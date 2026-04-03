@@ -17,6 +17,7 @@ from models import (
     ThreatInfo, ResourceInfo, AffectedZoneInfo,
     ClassificationPayload, PredictionPayload,
     AllocationPayload, CoordinationPayload, RescuePayload,
+    EvacuationPayload,
 )
 
 # ─────────────────────────────────────────────
@@ -287,6 +288,8 @@ class CrisisEnvironment:
             return self._handle_coordinate(action.coordination)
         elif t == ActionType.RESCUE and action.rescue:
             return self._handle_rescue(action.rescue)
+        elif t == ActionType.EVACUATE and action.evacuate:
+            return self._handle_evacuate(action.evacuate)
         else:
             return -0.2, ["[WARN] Invalid or incomplete action received."], {}
 
@@ -482,6 +485,47 @@ class CrisisEnvironment:
             f"Speed bonus={speed_bonus:.2f}"
         ], {"rescued": saved, "zone_id": payload.zone_id}
 
+    def _handle_evacuate(
+        self, payload: EvacuationPayload
+    ) -> Tuple[float, List[str], Dict]:
+        """
+        Handle proactive evacuation before impact.
+        Reduces potential casualties if threat impacts later.
+        """
+        # Find the threat associated with this zone
+        threat = self._get_threat(payload.zone_id)
+        if threat is None or threat.status != ThreatStatus.ACTIVE:
+            return -0.1, [
+                f"[WARN] EVACUATE: Zone {payload.zone_id} has no active threat."
+            ], {}
+
+        units = max(1, min(payload.evac_units, MAX_RESCUE_UNITS))
+        zone_multiplier = {
+            ZoneType.URBAN:    1.0,
+            ZoneType.MARITIME: 0.7,
+            ZoneType.MILITARY: 0.8,
+            ZoneType.RURAL:    0.9,
+        }.get(threat.zone, 1.0)
+
+        # Each unit evacuates up to 20 people
+        evacuated = min(
+            threat.population_at_risk,
+            int(units * 20 * zone_multiplier)
+        )
+        threat.population_at_risk = max(0, threat.population_at_risk - evacuated)
+        threat.population_evacuated = getattr(threat, 'population_evacuated', 0) + evacuated
+        self._casualties_prevented += evacuated
+
+        speed_bonus = _clamp(1.0 - (self._step_count / TOTAL_STEPS))
+        reward = (evacuated / max(threat.population_at_risk + evacuated, 1)) + speed_bonus * 0.3
+
+        return round(reward, 4), [
+            f"[EVACUATE] Zone {payload.zone_id}: "
+            f"{evacuated} people evacuated by {units} units. "
+            f"Remaining at risk: {threat.population_at_risk}. "
+            f"Speed bonus={speed_bonus:.2f}"
+        ], {"evacuated": evacuated, "zone_id": payload.zone_id}
+
     # ─────────────────────────────────────────
     # THREAT LIFECYCLE
     # ─────────────────────────────────────────
@@ -535,7 +579,7 @@ class CrisisEnvironment:
                         res.assigned_to  = None
 
                 # ── Cascading threat mechanic ─────────────────────────────
-                if self._rng.random() < 0.30:
+                if self._rng.random() < 0.40:
                     # Find a template not already in play
                     active_types = {t.threat_type for t in self._threats}
                     candidates = [

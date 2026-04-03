@@ -369,6 +369,7 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
     _predicted:   set = set()
     _coordinated: bool = False
     _allocated:   set = set()
+    _evacuated:   set = set()
 
     # ── Episode loop ───────────────────────────────────────────────────────
     while not done:
@@ -422,6 +423,21 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
         rescue_acts = _rescue_actions(impacted_zones)
         for ra in rescue_acts:
             actions_this_step.append(("rescue", {"zone_id": ra["rescue"]["zone_id"]}, ra))
+
+        # ── Phase 6: Evacuate — proactively evacuate zones for high-severity active threats
+        for threat in active_threats:
+            if (threat.get("severity", 0) >= 7.5
+                    and threat.get("time_to_impact", 99) <= 8
+                    and threat.get("threat_id") not in _evacuated):
+                actions_this_step.append(("evacuate", threat, {
+                    "action_type": "evacuate",
+                    "evacuate": {
+                        "zone_id": threat["threat_id"],
+                        "evac_units": 3,
+                        "population_move": threat.get("population_at_risk", 0),
+                    },
+                }))
+                _evacuated.add(threat["threat_id"])
 
         # ── Execute actions (one per step, pick highest priority) ─────────
         if actions_this_step:

@@ -169,6 +169,18 @@ async def list_tasks():
                 ),
                 "grader_range": [0.0, 1.0],
             },
+            {
+                "task_id":    6,
+                "name":       "Proactive Evacuation",
+                "difficulty": "medium",
+                "action_type": ActionType.EVACUATE,
+                "description": (
+                    "Proactively evacuate civilians before a threat impacts. "
+                    "Reduces population at risk and prevents casualties. "
+                    "Speed bonus decays over time."
+                ),
+                "grader_range": [0.0, 1.0],
+            },
         ]
     }
 
