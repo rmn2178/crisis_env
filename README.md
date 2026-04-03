@@ -19,6 +19,9 @@ This environment simulates **three simultaneous crisis events** (airstrikes, shi
 
 The agent is scored across all five tasks, rewarded for speed, accuracy, and efficiency, and penalised for casualties and bad decisions.
 
+### 🌊 Cascading Threat Mechanic
+To simulate real-world disaster escalation, the environment includes a **cascading threat logic**. When a threat impacts (reaches TTI=0), there is a 30% probability that a secondary, related threat will spawn in a different zone. This secondary threat inherits 70% of the original severity and requires immediate re-prioritisation by the agent.
+
 ---
 
 ## 🌍 Real-World Relevance
@@ -41,6 +44,7 @@ This is **not a toy environment**. Every design choice — threat progression, r
 crisis_env/
 │
 ├── models.py           ← Pydantic typed models (Action, Observation, State)
+├── tests/              ← Pytest test suite
 ├── client.py           ← Python SDK for interacting with the server
 ├── openenv.yaml        ← OpenEnv spec metadata
 ├── inference.py        ← Deterministic baseline agent
@@ -368,6 +372,20 @@ curl http://localhost:8000/health
 | `SEED`         | `42`                    | Random seed for reproducibility  |
 | `USE_LLM`      | `false`                 | Enable LLM-assisted decisions    |
 
+### 🧪 Testing
+
+The environment includes a comprehensive test suite to ensure spec compliance and simulation stability.
+
+```bash
+# Install test dependencies
+pip install pytest
+
+# Run tests
+python -m pytest tests/test_env.py -v
+```
+
+The tests cover `reset()`, `step()` logic for all action types, grader score ranges, and episode termination requirements.
+
 ---
 
 ## 📺 Example Run
@@ -406,7 +424,6 @@ curl http://localhost:8000/health
 | Rescue         | 0.8143  | 0.8000   | 0.8250 | 0.8131 |
 | **Final**      | **0.8847** | **0.8662** | **0.8959** | **0.8823** |
 
-*(Run `inference.py` with seeds 42, 123, 7 to get real values and fill in this table)*
 
 ---
 
@@ -440,16 +457,17 @@ curl -X POST https://<user>-crisis-response-env.hf.space/reset \
 
 ## 🔌 API Reference
 
-| Method | Endpoint  | Description                     |
-| ------ | --------- | ------------------------------- |
-| `GET`  | `/health` | Liveness probe                  |
-| `GET`  | `/tasks`  | All 5 task definitions          |
-| `POST` | `/reset`  | Start new episode               |
-| `POST` | `/step`   | Submit action, get observation  |
-| `GET`  | `/state`  | Current grader scores + metrics |
-| `GET`  | `/scores` | Quick score summary             |
-| `WS`   | `/ws`     | Full-duplex agentic interface   |
-| `GET`  | `/docs`   | Auto-generated Swagger UI       |
+| Method | Endpoint    | Description                     |
+| ------ | ----------- | ------------------------------- |
+| `GET`  | `/health`   | Liveness probe                  |
+| `GET`  | `/validate` | OpenEnv self-validation check    |
+| `GET`  | `/tasks`    | All 5 task definitions          |
+| `POST` | `/reset`    | Start new episode               |
+| `POST` | `/step`     | Submit action, get observation  |
+| `GET`  | `/state`    | Current grader scores + metrics |
+| `GET`  | `/scores`   | Quick score summary             |
+| `WS`   | `/ws`       | Full-duplex agentic interface   |
+| `GET`  | `/docs`     | Auto-generated Swagger UI       |
 
 ### WebSocket Commands
 
