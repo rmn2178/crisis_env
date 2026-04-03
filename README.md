@@ -17,7 +17,7 @@ This environment simulates **three simultaneous crisis events** (airstrikes, shi
 4. **Coordinate** a global priority ordering across all active threats
 5. **Rescue** victims from impacted zones, maximising lives saved
 
-The agent is scored across all five tasks, rewarded for speed, accuracy, and efficiency, and penalised for casualties and bad decisions.
+The agent is scored across all **six** tasks, rewarded for speed, accuracy, and efficiency, and penalised for casualties and bad decisions.
 
 ### 🌊 Cascading Threat Mechanic
 To simulate real-world disaster escalation, the environment includes a **cascading threat logic**. When a threat impacts (reaches TTI=0), there is a 30% probability that a secondary, related threat will spawn in a different zone. This secondary threat inherits 70% of the original severity and requires immediate re-prioritisation by the agent.
@@ -74,7 +74,7 @@ Agent
   │    └─ (repeat until done=True)
   │
   ├─ GET /state  ──────────────────────────────► CrisisEnvironment.state()
-  │                                                  └─ Returns all 5 grader scores
+  │                                                  └─ Returns all 6 grader scores
   │
   └─ WS /ws  ──────────────────────────────────► Full duplex agentic interface
 ```
@@ -163,6 +163,22 @@ Every step, the agent submits **one action** of the following types:
 ```
 
 **When to use:** As soon as a zone becomes `is_active=true` after an impact. Speed bonus decays over time.
+
+---
+
+### 6. `evacuate` — Proactive Evacuation
+
+```json
+{
+  "action_type": "evacuate",
+  "evacuate": {
+    "threat_id": 1,
+    "evac_units": 3
+  }
+}
+```
+
+**When to use:** Before an active threat impacts. Reduces population at risk and prevented casualties.
 
 ---
 
@@ -291,10 +307,19 @@ Returned by `GET /state`:
 | **Speed bonus** | Decays linearly over episode                                  |
 | **Score range** | `0.0 → 1.0`                                                   |
 
+### Task 6 — Proactive Evacuation (Medium)
+
+|                 |                                                               |
+| --------------- | ------------------------------------------------------------- |
+| **Action**      | `evacuate`                                                    |
+| **Grader**      | `correctly_evacuated_population / total_population_at_risk`   |
+| **Speed bonus** | Decays linearly over episode                                  |
+| **Score range** | `0.0 → 1.0`                                                   |
+
 **Final Score:**
 
 ```
-final_score = (classification + prediction + allocation + coordination + rescue) / 5
+final_score = (classification + prediction + allocation + coordination + rescue + evacuation) / 6
 ```
 
 ---
@@ -321,7 +346,7 @@ final_score = (classification + prediction + allocation + coordination + rescue)
 
 ### Final Grader Scores
 
-All 5 task scores are **always clamped to [0.0, 1.0]** via `max(0.0, min(1.0, value))`.
+All **6** task scores are **always clamped to [0.0, 1.0]** via `max(0.0, min(1.0, value))`.
 
 ---
 
@@ -422,7 +447,9 @@ The tests cover `reset()`, `step()` logic for all action types, grader score ran
 | Allocation     | 0.8967  | 0.8800   | 0.9100 | 0.8956 |
 | Coordination   | 0.9330  | 0.9100   | 0.9400 | 0.9277 |
 | Rescue         | 0.8143  | 0.8000   | 0.8250 | 0.8131 |
-| **Final**      | **0.8847** | **0.8662** | **0.8959** | **0.8823** |
+| Evacuation     | 0.0000  | 0.0000   | 0.0000 | 0.0000 |
+| **Final**      | **0.0000** | **0.0000** | **0.0000** | **0.0000** |
+| | | | | # Re-run inference.py to update these exact numbers for 6-task grading |
 
 
 ---
@@ -461,7 +488,7 @@ curl -X POST https://<user>-crisis-response-env.hf.space/reset \
 | ------ | ----------- | ------------------------------- |
 | `GET`  | `/health`   | Liveness probe                  |
 | `GET`  | `/validate` | OpenEnv self-validation check    |
-| `GET`  | `/tasks`    | All 5 task definitions          |
+| `GET`  | `/tasks`    | All 6 task definitions          |
 | `POST` | `/reset`    | Start new episode               |
 | `POST` | `/step`     | Submit action, get observation  |
 | `GET`  | `/state`    | Current grader scores + metrics |

@@ -175,9 +175,7 @@ async def list_tasks():
                 "difficulty": "medium",
                 "action_type": ActionType.EVACUATE,
                 "description": (
-                    "Proactively evacuate civilians before a threat impacts. "
-                    "Reduces population at risk and prevents casualties. "
-                    "Speed bonus decays over time."
+                    "Proactively evacuate civilians before a threat impacts to reduce casualties."
                 ),
                 "grader_range": [0.0, 1.0],
             },
@@ -192,7 +190,7 @@ async def validate_endpoint():
         "status": "ok",
         "openenv_yaml": "present",
         "endpoints": ["POST /reset", "POST /step", "GET /state", "GET /health", "GET /tasks"],
-        "task_count": 5,
+        "task_count": 6,
         "grader_score_range": [0.0, 1.0],
         "spec_version": "1.0"
     }

@@ -129,6 +129,8 @@ class CrisisEnvironment:
         self._rescue_total_victims:  int = 0
         self._rescue_saved:          int = 0
         self._rescue_steps:          List[int] = []   # step number of each rescue action
+        self._evac_total_possible:   int = 0
+        self._evac_total_saved:      int = 0
 
     # ─────────────────────────────────────────
     # PUBLIC API
@@ -162,6 +164,8 @@ class CrisisEnvironment:
         self._rescue_total_victims = 0
         self._rescue_saved         = 0
         self._rescue_steps         = []
+        self._evac_total_possible  = 0
+        self._evac_total_saved     = 0
 
         # Generate scenario
         self._threats        = self._generate_threats()
@@ -239,8 +243,9 @@ class CrisisEnvironment:
         a_score  = self._grader_allocation()
         co_score = self._grader_coordination()
         r_score  = self._grader_rescue()
+        e_score  = self._grader_evacuation()
 
-        final = round((c_score + p_score + a_score + co_score + r_score) / 5.0, 4)
+        final = round((c_score + p_score + a_score + co_score + r_score + e_score) / 6.0, 4)
 
         total_victims = max(self._rescue_total_victims, 1)
         rescue_rate   = _clamp(self._rescue_saved / total_victims)
@@ -254,6 +259,7 @@ class CrisisEnvironment:
             allocation_score=a_score,
             coordination_score=co_score,
             rescue_score=r_score,
+            evacuation_score=e_score,
             final_score=final,
             resolved_threats=sum(
                 1 for t in self._threats
@@ -492,11 +498,11 @@ class CrisisEnvironment:
         Handle proactive evacuation before impact.
         Reduces potential casualties if threat impacts later.
         """
-        # Find the threat associated with this zone
-        threat = self._get_threat(payload.zone_id)
+        # Find the threat directly by threat_id
+        threat = self._get_threat(payload.threat_id)
         if threat is None or threat.status != ThreatStatus.ACTIVE:
             return -0.1, [
-                f"[WARN] EVACUATE: Zone {payload.zone_id} has no active threat."
+                f"[WARN] EVACUATE: Threat {payload.threat_id} is not active."
             ], {}
 
         units = max(1, min(payload.evac_units, MAX_RESCUE_UNITS))
@@ -512,19 +518,30 @@ class CrisisEnvironment:
             threat.population_at_risk,
             int(units * 20 * zone_multiplier)
         )
-        threat.population_at_risk = max(0, threat.population_at_risk - evacuated)
+        remaining_pop = threat.population_at_risk - evacuated
+        threat.population_at_risk = max(0, remaining_pop)
         threat.population_evacuated = getattr(threat, 'population_evacuated', 0) + evacuated
         self._casualties_prevented += evacuated
 
+        # Tracking for evac grader
+        self._evac_total_saved += evacuated
+        self._evac_total_possible += (evacuated + remaining_pop)
+
         speed_bonus = _clamp(1.0 - (self._step_count / TOTAL_STEPS))
-        reward = (evacuated / max(threat.population_at_risk + evacuated, 1)) + speed_bonus * 0.3
+        reward = (evacuated / max(evacuated + remaining_pop, 1)) + speed_bonus * 0.3
 
         return round(reward, 4), [
-            f"[EVACUATE] Zone {payload.zone_id}: "
+            f"[EVACUATE] Threat {payload.threat_id}: "
             f"{evacuated} people evacuated by {units} units. "
             f"Remaining at risk: {threat.population_at_risk}. "
             f"Speed bonus={speed_bonus:.2f}"
-        ], {"evacuated": evacuated, "zone_id": payload.zone_id}
+        ], {"evacuated": evacuated, "threat_id": payload.threat_id}
+
+    def _grader_evacuation(self) -> float:
+        """Task 6: correctly evacuated population / possible population."""
+        if self._evac_total_possible == 0:
+            return 0.0
+        return round(_clamp(self._evac_total_saved / self._evac_total_possible), 4)
 
     # ─────────────────────────────────────────
     # THREAT LIFECYCLE

@@ -136,9 +136,8 @@ class RescuePayload(BaseModel):
 
 class EvacuationPayload(BaseModel):
     """Payload for EVACUATE action — proactive evacuation before impact."""
-    zone_id:         int = Field(..., description="Zone to evacuate")
-    evac_units:      int = Field(..., ge=1, description="Number of evacuation units to deploy")
-    population_move: int = Field(default=0, description="Estimated population moved to safety")
+    threat_id: int = Field(..., description="Threat ID to evacuate civilians from")
+    evac_units: int = Field(..., ge=1, description="Number of evacuation units")
 
 
 # ─────────────────────────────────────────────
@@ -196,6 +195,7 @@ class CrisisState(BaseModel):
     allocation_score:     float = Field(default=0.0, ge=0.0, le=1.0)
     coordination_score:   float = Field(default=0.0, ge=0.0, le=1.0)
     rescue_score:         float = Field(default=0.0, ge=0.0, le=1.0)
+    evacuation_score:     float = Field(default=0.0, ge=0.0, le=1.0)
     final_score:          float = Field(default=0.0, ge=0.0, le=1.0)
 
     # Outcome counters

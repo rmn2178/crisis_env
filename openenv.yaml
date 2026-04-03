@@ -67,6 +67,9 @@ action_space:
     - name: rescue
       description: Deploy rescue units into an impacted zone
       payload: RescuePayload
+    - name: evacuate
+      description: Proactively evacuate civilians before impact
+      payload: EvacuationPayload
 
 tasks:
   - id: 1
@@ -118,6 +121,15 @@ tasks:
     description: >
       Deploy rescue units into impacted zones to maximise lives saved.
       Score = (lives_saved_ratio + speed_score + resource_efficiency) / 3.
+
+  - id: 6
+    name: Proactive Evacuation
+    difficulty: medium
+    action: evacuate
+    grader: evacuation_score
+    score_range: [0.0, 1.0]
+    description: >
+      Proactively evacuate civilians before a threat impacts to reduce casualties.
 
 reward:
   internal_range: [-inf, +inf]

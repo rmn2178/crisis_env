@@ -432,9 +432,8 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
                 actions_this_step.append(("evacuate", threat, {
                     "action_type": "evacuate",
                     "evacuate": {
-                        "zone_id": threat["threat_id"],
+                        "threat_id": threat["threat_id"],
                         "evac_units": 3,
-                        "population_move": threat.get("population_at_risk", 0),
                     },
                 }))
                 _evacuated.add(threat["threat_id"])
