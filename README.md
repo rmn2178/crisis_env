@@ -20,6 +20,7 @@ This environment simulates **three simultaneous crisis events** (airstrikes, shi
 The agent is scored across all **six** tasks, rewarded for speed, accuracy, and efficiency, and penalised for casualties and bad decisions.
 
 ### 🌊 Cascading Threat Mechanic
+
 To simulate real-world disaster escalation, the environment includes a **cascading threat logic**. When a threat impacts (reaches TTI=0), there is a 30% probability that a secondary, related threat will spawn in a different zone. This secondary threat inherits 70% of the original severity and requires immediate re-prioritisation by the agent.
 
 ---
@@ -310,12 +311,12 @@ Returned by `GET /state`:
 
 ### Task 6 — Proactive Evacuation (Medium)
 
-|                 |                                                               |
-| --------------- | ------------------------------------------------------------- |
-| **Action**      | `evacuate`                                                    |
-| **Grader**      | `correctly_evacuated_population / total_population_at_risk`   |
-| **Speed bonus** | Decays linearly over episode                                  |
-| **Score range** | `0.0 → 1.0`                                                   |
+|                 |                                                             |
+| --------------- | ----------------------------------------------------------- |
+| **Action**      | `evacuate`                                                  |
+| **Grader**      | `correctly_evacuated_population / total_population_at_risk` |
+| **Speed bonus** | Decays linearly over episode                                |
+| **Score range** | `0.0 → 1.0`                                                 |
 
 **Final Score:**
 
@@ -441,17 +442,15 @@ The tests cover `reset()`, `step()` logic for all action types, grader score ran
 
 **Baseline scores (multi-seed):**
 
-| Task           | Seed 42 | Seed 123 | Seed 7  | Mean   |
-| -------------- | ------- | -------- | ------- | ------ |
-| Classification | 1.0000  | 1.0000   | 1.0000  | 1.0000 |
-| Prediction     | 0.9497  | 0.9500   | 0.9497  | 0.9498 |
-| Allocation     | 0.8850  | 0.8800   | 0.8900  | 0.8850 |
-| Coordination   | 1.0000  | 1.0000   | 1.0000  | 1.0000 |
-| Rescue         | 0.7218  | 0.7200   | 0.7218  | 0.7212 |
+| Task           | Seed 42    | Seed 123   | Seed 7     | Mean       |
+| -------------- | ---------- | ---------- | ---------- | ---------- |
+| Classification | 1.0000     | 1.0000     | 1.0000     | 1.0000     |
+| Prediction     | 0.9497     | 0.9500     | 0.9497     | 0.9498     |
+| Allocation     | 0.8850     | 0.8800     | 0.8900     | 0.8850     |
+| Coordination   | 1.0000     | 1.0000     | 1.0000     | 1.0000     |
+| Rescue         | 0.7218     | 0.7200     | 0.7218     | 0.7212     |
 | **Evacuation** | **0.8500** | **0.8400** | **0.8500** | **0.8467** |
 | **Final**      | **0.8678** | **0.8650** | **0.8686** | **0.8671** |
-
-
 
 ---
 
@@ -488,7 +487,7 @@ curl -X POST https://<user>-crisis-response-env.hf.space/reset \
 | Method | Endpoint    | Description                     |
 | ------ | ----------- | ------------------------------- |
 | `GET`  | `/health`   | Liveness probe                  |
-| `GET`  | `/validate` | OpenEnv self-validation check    |
+| `GET`  | `/validate` | OpenEnv self-validation check   |
 | `GET`  | `/tasks`    | All 6 task definitions          |
 | `POST` | `/reset`    | Start new episode               |
 | `POST` | `/step`     | Submit action, get observation  |

@@ -6,7 +6,7 @@ Implements the full OpenEnv spec: Action, Observation, State, and supporting dat
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 # ─────────────────────────────────────────────
@@ -159,8 +159,7 @@ class CrisisAction(BaseModel):
     rescue:         Optional[RescuePayload]         = None
     evacuate:       Optional[EvacuationPayload]     = None
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class CrisisObservation(BaseModel):
@@ -176,8 +175,7 @@ class CrisisObservation(BaseModel):
     alerts:         List[str]              = Field(default_factory=list, description="Human-readable event log")
     episode_id:     str                    = Field(default="", description="Unique ID for this episode")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class CrisisState(BaseModel):
@@ -210,8 +208,7 @@ class CrisisState(BaseModel):
     cumulative_reward:    float = Field(default=0.0)
     done:                 bool  = Field(default=False)
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class StepResult(BaseModel):
@@ -221,5 +218,4 @@ class StepResult(BaseModel):
     done:        bool
     info:        Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
