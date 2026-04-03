@@ -496,11 +496,24 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log_start()
+    SEEDS = [42, 123, 7]
+    all_finals: List[float] = []
 
     try:
-        scores = run_episode(seed=SEED)
-        log_info(f"Run complete — final_score={scores['final']:.4f}")
+        for seed in SEEDS:
+            log_start()
+            _step_counter = 0  # reset step counter for each seed
+            scores = run_episode(seed=seed)
+            all_finals.append(scores["final"])
+            log_info(f"Run complete — seed={seed} final_score={scores['final']:.4f}")
+
+        # Print summary across all seeds
+        mean_final = sum(all_finals) / len(all_finals)
+        std_final = (sum((x - mean_final) ** 2 for x in all_finals) / len(all_finals)) ** 0.5
+        print(
+            f"[SCORE_SUMMARY] mean_final={mean_final:.4f} | std={std_final:.4f} | seeds={SEEDS}",
+            flush=True,
+        )
         sys.exit(0)
 
     except KeyboardInterrupt:

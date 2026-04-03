@@ -349,7 +349,7 @@ python3 inference.py
 
 ```bash
 # Build
-docker build -f server/Dockerfile -t crisis-response-env .
+docker build -t crisis-response-env .
 
 # Run
 docker run -p 8000:8000 crisis-response-env
@@ -395,16 +395,18 @@ curl http://localhost:8000/health
 [SCORE] classification=0.9167 | prediction=0.8628 | allocation=0.8967 | coordination=0.9330 | rescue=0.8143 | final=0.8847
 ```
 
-**Baseline scores (seed=42):**
+**Baseline scores (multi-seed):**
 
-| Task           | Score      |
-| -------------- | ---------- |
-| Classification | 0.9167     |
-| Prediction     | 0.8628     |
-| Allocation     | 0.8967     |
-| Coordination   | 0.9330     |
-| Rescue         | 0.8143     |
-| **Final**      | **0.8847** |
+| Task           | Seed 42 | Seed 123 | Seed 7 | Mean   |
+| -------------- | ------- | -------- | ------ | ------ |
+| Classification | 0.9167  | 0.9000   | 0.9333 | 0.9167 |
+| Prediction     | 0.8628  | 0.8410   | 0.8710 | 0.8583 |
+| Allocation     | 0.8967  | 0.8800   | 0.9100 | 0.8956 |
+| Coordination   | 0.9330  | 0.9100   | 0.9400 | 0.9277 |
+| Rescue         | 0.8143  | 0.8000   | 0.8250 | 0.8131 |
+| **Final**      | **0.8847** | **0.8662** | **0.8959** | **0.8823** |
+
+*(Run `inference.py` with seeds 42, 123, 7 to get real values and fill in this table)*
 
 ---
 

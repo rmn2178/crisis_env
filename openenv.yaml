@@ -91,7 +91,7 @@ tasks:
 
   - id: 3
     name: Resource Allocation
-    difficulty: medium_plus
+    difficulty: hard
     action: allocate
     grader: allocation_score
     score_range: [0.0, 1.0]
@@ -111,7 +111,7 @@ tasks:
 
   - id: 5
     name: Rescue Optimisation
-    difficulty: advanced
+    difficulty: hard
     action: rescue
     grader: rescue_score
     score_range: [0.0, 1.0]

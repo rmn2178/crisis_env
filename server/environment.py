@@ -534,6 +534,39 @@ class CrisisEnvironment:
                         res.is_available = True
                         res.assigned_to  = None
 
+                # ── Cascading threat mechanic ─────────────────────────────
+                if self._rng.random() < 0.30:
+                    # Find a template not already in play
+                    active_types = {t.threat_type for t in self._threats}
+                    candidates = [
+                        tmpl for tmpl in THREAT_TEMPLATES
+                        if tmpl[0] != threat.threat_type and tmpl[0] not in active_types
+                    ]
+                    if candidates:
+                        tmpl = self._rng.choice(candidates)
+                        new_severity = min(threat.severity * 0.7, 10.0)
+                        new_tti = self._rng.randint(3, 8)
+                        new_id = max(t.threat_id for t in self._threats) + 1
+                        pop_jitter = self._rng.randint(
+                            -int(tmpl[3] * 0.2), int(tmpl[3] * 0.2)
+                        )
+                        new_pop = max(10, tmpl[3] + pop_jitter)
+                        cascade_threat = ThreatInfo(
+                            threat_id=new_id,
+                            threat_type=tmpl[0],
+                            status=ThreatStatus.ACTIVE,
+                            severity=round(new_severity, 1),
+                            population_at_risk=new_pop,
+                            time_to_impact=new_tti,
+                            zone=tmpl[1],
+                            location_name=tmpl[2],
+                        )
+                        self._threats.append(cascade_threat)
+                        self._total_population += new_pop
+                        alerts.append(
+                            f"[CASCADE] New threat spawned from {threat.location_name} impact"
+                        )
+
             elif threat.assigned_resource is not None:
                 # Threat with resource assigned → may become contained
                 resource = self._get_resource(threat.assigned_resource)

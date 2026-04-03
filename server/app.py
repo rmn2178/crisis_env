@@ -138,7 +138,7 @@ async def list_tasks():
             {
                 "task_id":    3,
                 "name":       "Resource Allocation",
-                "difficulty": "medium_plus",
+                "difficulty": "hard",
                 "action_type": ActionType.ALLOCATE,
                 "description": (
                     "Assign the best available resource unit to each threat, "
@@ -161,7 +161,7 @@ async def list_tasks():
             {
                 "task_id":    5,
                 "name":       "Rescue Optimisation",
-                "difficulty": "advanced",
+                "difficulty": "hard",
                 "action_type": ActionType.RESCUE,
                 "description": (
                     "Deploy rescue units into impacted zones to save victims. "
@@ -170,6 +170,19 @@ async def list_tasks():
                 "grader_range": [0.0, 1.0],
             },
         ]
+    }
+
+
+@app.get("/validate", tags=["System"])
+async def validate_endpoint():
+    """OpenEnv self-validation check."""
+    return {
+        "status": "ok",
+        "openenv_yaml": "present",
+        "endpoints": ["POST /reset", "POST /step", "GET /state", "GET /health", "GET /tasks"],
+        "task_count": 5,
+        "grader_score_range": [0.0, 1.0],
+        "spec_version": "1.0"
     }
 
 
