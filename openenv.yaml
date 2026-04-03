@@ -22,13 +22,14 @@ environment:
   protocol: http+websocket
 
 endpoints:
-  reset:   POST /reset
-  step:    POST /step
-  state:   GET  /state
-  health:  GET  /health
-  tasks:   GET  /tasks
-  scores:  GET  /scores
-  ws:      WS   /ws
+  reset:    POST /reset
+  step:     POST /step
+  state:    GET  /state
+  health:   GET  /health
+  validate: GET  /validate
+  tasks:    GET  /tasks
+  scores:   GET  /scores
+  ws:       WS   /ws
 
 observation_space:
   type: structured

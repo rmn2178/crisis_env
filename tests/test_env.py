@@ -250,3 +250,40 @@ def test_determinism_same_seed():
         assert r1.resource_id == r2.resource_id
         assert r1.resource_type == r2.resource_type
         assert r1.effectiveness == r2.effectiveness
+
+
+def test_evacuate_action_reduces_population(env):
+    """EVACUATE action reduces population_at_risk and returns valid reward."""
+    obs = env.reset()
+    # Find an active threat
+    active = [t for t in obs.threats if t.status.value == "active"]
+    assert len(active) > 0
+    threat = active[0]
+    original_pop = threat.population_at_risk
+
+    action = CrisisAction(
+        action_type="evacuate",
+        evacuate=__import__("models", fromlist=["EvacuationPayload"]).EvacuationPayload(
+            threat_id=threat.threat_id,
+            evac_units=5,
+        ),
+    )
+    result = env.step(action)
+    assert isinstance(result, StepResult)
+    assert isinstance(result.reward, float)
+    assert isinstance(result.done, bool)
+
+    # Population at risk should have decreased
+    updated_threat = next(
+        (t for t in result.observation.threats if t.threat_id == threat.threat_id),
+        None
+    )
+    assert updated_threat is not None
+    assert updated_threat.population_at_risk < original_pop, (
+        "Evacuation should reduce population_at_risk"
+    )
+
+    # Evacuation grader should now be > 0
+    state = env.state()
+    assert state.evacuation_score > 0.0, "Evacuation grader must be > 0 after evacuation"
+    assert 0.0 <= state.evacuation_score <= 1.0

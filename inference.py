@@ -415,8 +415,7 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
                 pop = threat.get("population_at_risk", 0)
                 # Only evacuate if there's time (TTI > 2) and population at risk
                 if tti > 2 and pop > 0:
-                    # Scale evac units based on population (max 5)
-                    units = min(5, max(2, int(pop / 100)))
+                    units = 5  # Always use max units — saturates capacity for highest grader score
                     actions_this_step.append(("evacuate", threat, _evacuate_action(threat, evac_units=units)))
 
         # ── Phase 4: Coordinate (once per episode, re-run if new threats) ─

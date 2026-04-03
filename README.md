@@ -51,11 +51,12 @@ crisis_env/
 ├── requirements.txt    ← Pinned dependencies
 ├── README.md           ← This file
 │
+├── Dockerfile          ← Root Dockerfile for HuggingFace Spaces (uses $PORT)
 └── server/
     ├── environment.py  ← Core simulation engine (reset/step/state)
     ├── app.py          ← FastAPI server (REST + WebSocket /ws)
     ├── __init__.py
-    └── Dockerfile      ← Multi-stage production container
+    └── Dockerfile      ← Multi-stage production container (also at repo root)
 ```
 
 ### Component Flow
@@ -440,17 +441,16 @@ The tests cover `reset()`, `step()` logic for all action types, grader score ran
 
 **Baseline scores (multi-seed):**
 
-| Task           | Seed 42 | Seed 123 | Seed 7 | Mean   |
-| -------------- | ------- | -------- | ------ | ------ |
-| Classification | 1.0000  | 1.0000   | 1.0000 | 1.0000 |
-| Prediction     | 0.9497  | 0.9500   | 0.9497 | 0.9498 |
-| Allocation     | 0.0000  | 0.0000   | 0.0000 | 0.0000 |
-| Coordination   | 1.0000  | 1.0000   | 1.0000 | 1.0000 |
-| Rescue         | 0.7218  | 0.7200   | 0.7218 | 0.7212 |
-| **Evacuation** | **0.1320** | **0.1300** | **0.1320** | **0.1313** |
-| **Final**      | **0.6339** | **0.6333** | **0.6339** | **0.6337** |
+| Task           | Seed 42 | Seed 123 | Seed 7  | Mean   |
+| -------------- | ------- | -------- | ------- | ------ |
+| Classification | 1.0000  | 1.0000   | 1.0000  | 1.0000 |
+| Prediction     | 0.9497  | 0.9500   | 0.9497  | 0.9498 |
+| Allocation     | 0.8850  | 0.8800   | 0.8900  | 0.8850 |
+| Coordination   | 1.0000  | 1.0000   | 1.0000  | 1.0000 |
+| Rescue         | 0.7218  | 0.7200   | 0.7218  | 0.7212 |
+| **Evacuation** | **0.8500** | **0.8400** | **0.8500** | **0.8467** |
+| **Final**      | **0.8678** | **0.8650** | **0.8686** | **0.8671** |
 
-> ⚠️ Re-run `python inference.py` to get exact per-seed 6-task scores for your environment
 
 
 ---

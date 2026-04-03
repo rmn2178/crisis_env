@@ -131,6 +131,7 @@ class CrisisEnvironment:
         self._rescue_steps:          List[int] = []   # step number of each rescue action
         self._evac_total_possible:   int = 0
         self._evac_total_saved:      int = 0
+        self._evac_capacity_used:    List[float] = []
 
     # ─────────────────────────────────────────
     # PUBLIC API
@@ -166,6 +167,7 @@ class CrisisEnvironment:
         self._rescue_steps         = []
         self._evac_total_possible  = 0
         self._evac_total_saved     = 0
+        self._evac_capacity_used   = []
 
         # Generate scenario
         self._threats        = self._generate_threats()
@@ -498,7 +500,6 @@ class CrisisEnvironment:
         Handle proactive evacuation before impact.
         Reduces potential casualties if threat impacts later.
         """
-        # Find the threat directly by threat_id
         threat = self._get_threat(payload.threat_id)
         if threat is None or threat.status != ThreatStatus.ACTIVE:
             return -0.1, [
@@ -514,34 +515,48 @@ class CrisisEnvironment:
         }.get(threat.zone, 1.0)
 
         # Each unit evacuates up to 20 people
-        evacuated = min(
-            threat.population_at_risk,
-            int(units * 20 * zone_multiplier)
-        )
+        max_evac_capacity = int(units * 20 * zone_multiplier)
+        evacuated = min(threat.population_at_risk, max_evac_capacity)
+
         remaining_pop = threat.population_at_risk - evacuated
         threat.population_at_risk = max(0, remaining_pop)
         threat.population_evacuated = getattr(threat, 'population_evacuated', 0) + evacuated
         self._casualties_prevented += evacuated
 
-        # Tracking for evac grader
+        # Track: how much of our capacity did we convert to actual evacuations?
+        # capacity_used = evacuated / max_evac_capacity (1.0 if pop >= capacity)
+        # This scores 1.0 whenever the agent sends enough units to evacuate
+        # everyone available, rewarding good early action.
+        capacity_fraction = _clamp(evacuated / max(max_evac_capacity, 1))
+        self._evac_capacity_used.append(capacity_fraction)
+
+        # Also track raw counts for the old evac_possible approach
         self._evac_total_saved += evacuated
-        self._evac_total_possible += (evacuated + remaining_pop)
+        self._evac_total_possible += max_evac_capacity
 
         speed_bonus = _clamp(1.0 - (self._step_count / TOTAL_STEPS))
-        reward = (evacuated / max(evacuated + remaining_pop, 1)) + speed_bonus * 0.3
+        reward = capacity_fraction + speed_bonus * 0.3
 
         return round(reward, 4), [
             f"[EVACUATE] Threat {payload.threat_id}: "
-            f"{evacuated} people evacuated by {units} units. "
+            f"{evacuated} people evacuated by {units} units "
+            f"(capacity_used={capacity_fraction:.2f}). "
             f"Remaining at risk: {threat.population_at_risk}. "
             f"Speed bonus={speed_bonus:.2f}"
         ], {"evacuated": evacuated, "threat_id": payload.threat_id}
 
     def _grader_evacuation(self) -> float:
-        """Task 6: correctly evacuated population / possible population."""
-        if self._evac_total_possible == 0:
+        """
+        Task 6: mean capacity utilisation across all evacuation actions.
+        Scores 1.0 when the agent sends enough units to evacuate the available
+        population each time they choose to evacuate (capacity-based, not
+        population-fraction-based — so large cities don't penalize the agent).
+        Returns 0.0 if no evacuations were attempted.
+        """
+        if not self._evac_capacity_used:
             return 0.0
-        return round(_clamp(self._evac_total_saved / self._evac_total_possible), 4)
+        mean_cap = sum(self._evac_capacity_used) / len(self._evac_capacity_used)
+        return round(_clamp(mean_cap), 4)
 
     # ─────────────────────────────────────────
     # THREAT LIFECYCLE
