@@ -62,6 +62,7 @@ def run_baseline_episode(seed: int) -> EpisodeSummary:
 
     classified = set()
     predicted = set()
+    evacuated = set()
     allocated = set()
     coordinated = False
 
@@ -102,6 +103,21 @@ def run_baseline_episode(seed: int) -> EpisodeSummary:
                     },
                 })
                 predicted.add(t["threat_id"])
+
+        # Evacuate
+        for t in active:
+            if t["threat_id"] not in evacuated:
+                tti = t.get("time_to_impact", 0)
+                pop = t.get("population_at_risk", 0)
+                if tti > 2 and pop > 0:
+                    units = min(5, max(2, int(pop / 100)))
+                    actions.append({
+                        "action_type": "evacuate",
+                        "evacuate": {
+                            "threat_id": t["threat_id"],
+                            "evac_units": units,
+                        },
+                    })
 
         # Coordinate
         if active and not coordinated:
@@ -153,6 +169,10 @@ def run_baseline_episode(seed: int) -> EpisodeSummary:
         threats = observation.get("threats", threats)
         resources = observation.get("resources", resources)
         zones = observation.get("affected_zones", zones)
+
+        # Track executed evacuate action
+        if action.get("action_type") == "evacuate":
+            evacuated.add(action["evacuate"]["threat_id"])
 
     state = env.state()
     task_scores = state_to_metrics(state)
@@ -307,7 +327,7 @@ def evaluate(
 
     print(f"  {'-'*25} {'-'*12} {'-'*12} {'-'*10}")
 
-    for task in ["classification", "prediction", "allocation", "coordination", "rescue"]:
+    for task in ["classification", "prediction", "allocation", "coordination", "rescue", "evacuation"]:
         b = avg_task_score(baseline_results, task)
         t = avg_task_score(trained_results, task)
         print(f"  {task.title():<25} {b:>12.4f} {t:>12.4f} {t-b:>+10.4f}")

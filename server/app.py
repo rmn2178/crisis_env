@@ -248,7 +248,7 @@ async def state_endpoint(session_id: str = _DEFAULT_SESSION):
 @app.get("/scores", tags=["OpenEnv"])
 async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
     """
-    Convenience endpoint returning only the grader scores for all 5 tasks.
+    Convenience endpoint returning only the grader scores for all 6 tasks.
     Used by automated evaluation harness.
     """
     env   = _get_env(session_id)
@@ -260,6 +260,7 @@ async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
             "allocation":     state.allocation_score,
             "coordination":   state.coordination_score,
             "rescue":         state.rescue_score,
+            "evacuation":     state.evacuation_score,
         },
         "final_score":       state.final_score,
         "episode_id":        state.episode_id,

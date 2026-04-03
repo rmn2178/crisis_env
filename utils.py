@@ -43,7 +43,7 @@ RESOURCE_TYPES: List[str] = [
     "evacuation_bus",
 ]
 ZONE_TYPES: List[str] = ["military", "maritime", "urban", "rural"]
-ACTION_TYPES: List[str] = ["classify", "predict", "allocate", "coordinate", "rescue"]
+ACTION_TYPES: List[str] = ["classify", "predict", "allocate", "coordinate", "rescue", "evacuate"]
 
 MAX_THREATS = 3
 MAX_RESOURCES = 8
@@ -152,6 +152,7 @@ def state_to_metrics(state: Any) -> Dict[str, float]:
         "allocation": float(payload.get("allocation_score", 0.0)),
         "coordination": float(payload.get("coordination_score", 0.0)),
         "rescue": float(payload.get("rescue_score", 0.0)),
+        "evacuation": float(payload.get("evacuation_score", 0.0)),
         "final": float(payload.get("final_score", 0.0)),
     }
 
@@ -590,6 +591,7 @@ def run_local_baseline_episode(seed: int) -> EpisodeSummary:
 
     classified: set[int] = set()
     predicted: set[int] = set()
+    evacuated: set[int] = set()
     allocated: set[int] = set()
     coordinated = False
 
@@ -609,6 +611,21 @@ def run_local_baseline_episode(seed: int) -> EpisodeSummary:
             if threat_id not in predicted:
                 actions_this_step.append(baseline_prediction(threat))
                 predicted.add(threat_id)
+
+        for threat in active_threats:
+            threat_id = threat["threat_id"]
+            if threat_id not in evacuated:
+                tti = threat.get("time_to_impact", 0)
+                pop = threat.get("population_at_risk", 0)
+                if tti > 2 and pop > 0:
+                    units = min(5, max(2, int(pop / 100)))
+                    actions_this_step.append({
+                        "action_type": "evacuate",
+                        "evacuate": {
+                            "threat_id": threat_id,
+                            "evac_units": units,
+                        },
+                    })
 
         if active_threats and not coordinated:
             actions_this_step.append(baseline_coordinate(threats))
@@ -647,6 +664,10 @@ def run_local_baseline_episode(seed: int) -> EpisodeSummary:
         new_active_ids = {threat["threat_id"] for threat in threats if threat.get("status") == "active"}
         if new_active_ids - allocated:
             coordinated = False
+
+        # Track executed evacuate action
+        if action.get("action_type") == "evacuate":
+            evacuated.add(action["evacuate"]["threat_id"])
 
     state = env.state()
     task_scores = state_to_metrics(state)

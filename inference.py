@@ -86,6 +86,7 @@ def log_score(scores: Dict[str, Any]):
         f"allocation={scores.get('allocation', 0):.4f} | "
         f"coordination={scores.get('coordination', 0):.4f} | "
         f"rescue={scores.get('rescue', 0):.4f} | "
+        f"evacuation={scores.get('evacuation', 0):.4f} | "
         f"final={scores.get('final', 0):.4f}",
         flush=True,
     )
@@ -283,6 +284,22 @@ def _rescue_actions(zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         })
     return actions
 
+
+def _evacuate_action(threat: Dict[str, Any], evac_units: int = 3) -> Dict[str, Any]:
+    """
+    Build an EVACUATE action for proactive evacuation before impact.
+    Grader: correctly_evacuated_population / total_population_at_risk
+    Speed bonus: decays linearly over episode
+    Best practice: call when time_to_impact > 2 to allow evacuation to take effect
+    """
+    return {
+        "action_type": "evacuate",
+        "evacuate": {
+            "threat_id": threat["threat_id"],
+            "evac_units": evac_units,
+        },
+    }
+
 # ─────────────────────────────────────────────
 # OPTIONAL: LLM-ASSISTED DECISION LAYER
 # ─────────────────────────────────────────────
@@ -383,16 +400,26 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
             tid = threat["threat_id"]
             if tid not in _classified:
                 actions_this_step.append(("classify", threat, _classify_action(threat)))
-                _classified.add(tid)
 
-        # ── Phase 2: Predict impact for unclassified threats ─────────────
+        # ── Phase 2: Predict impact for unpredicted threats ──────────────
         for threat in active_threats:
             tid = threat["threat_id"]
             if tid not in _predicted:
                 actions_this_step.append(("predict", threat, _predict_action(threat)))
-                _predicted.add(tid)
 
-        # ── Phase 3: Coordinate (once per episode, re-run if new threats) ─
+        # ── Phase 3: Evacuate — proactive population reduction before impact
+        for threat in active_threats:
+            tid = threat["threat_id"]
+            if tid not in _evacuated:
+                tti = threat.get("time_to_impact", 0)
+                pop = threat.get("population_at_risk", 0)
+                # Only evacuate if there's time (TTI > 2) and population at risk
+                if tti > 2 and pop > 0:
+                    # Scale evac units based on population (max 5)
+                    units = min(5, max(2, int(pop / 100)))
+                    actions_this_step.append(("evacuate", threat, _evacuate_action(threat, evac_units=units)))
+
+        # ── Phase 4: Coordinate (once per episode, re-run if new threats) ─
         if active_threats and not _coordinated:
             if llm_client:
                 order = _llm_suggest_priority(active_threats, llm_client)
@@ -403,9 +430,8 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
             else:
                 coord_action = _coordinate_action(threats)
             actions_this_step.append(("coordinate", {"threat_id": "all"}, coord_action))
-            _coordinated = True
 
-        # ── Phase 4: Allocate resources to unallocated high-priority threats
+        # ── Phase 5: Allocate resources to unallocated high-priority threats
         ranked = sorted(active_threats, key=_priority_score, reverse=True)
         for threat in ranked:
             tid = threat["threat_id"]
@@ -413,30 +439,11 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
                 alloc = _allocate_action(threat, resources)
                 if alloc:
                     actions_this_step.append(("allocate", threat, alloc))
-                    _allocated.add(tid)
-                    # Mark resource as used locally to avoid double-assignment
-                    for r in resources:
-                        if r["resource_id"] == alloc["allocation"]["resource_id"]:
-                            r["is_available"] = False
 
-        # ── Phase 5: Rescue all active zones ─────────────────────────────
+        # ── Phase 6: Rescue all active zones ─────────────────────────────
         rescue_acts = _rescue_actions(impacted_zones)
         for ra in rescue_acts:
             actions_this_step.append(("rescue", {"zone_id": ra["rescue"]["zone_id"]}, ra))
-
-        # ── Phase 6: Evacuate — proactively evacuate zones for high-severity active threats
-        for threat in active_threats:
-            if (threat.get("severity", 0) >= 7.5
-                    and threat.get("time_to_impact", 99) <= 8
-                    and threat.get("threat_id") not in _evacuated):
-                actions_this_step.append(("evacuate", threat, {
-                    "action_type": "evacuate",
-                    "evacuate": {
-                        "threat_id": threat["threat_id"],
-                        "evac_units": 3,
-                    },
-                }))
-                _evacuated.add(threat["threat_id"])
 
         # ── Execute actions (one per step, pick highest priority) ─────────
         if actions_this_step:
@@ -461,6 +468,25 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
 
             result_label = alerts[0][:80] if alerts else "ok"
             log_step(action_type_label, target_label, result_label, reward, done)
+
+            # ── Update tracking sets based on what was actually executed ──
+            executed_tid = target_obj.get("threat_id")
+            if action_type_label == "classify" and executed_tid:
+                _classified.add(executed_tid)
+            elif action_type_label == "predict" and executed_tid:
+                _predicted.add(executed_tid)
+            elif action_type_label == "evacuate" and executed_tid:
+                _evacuated.add(executed_tid)
+            elif action_type_label == "coordinate":
+                _coordinated = True
+            elif action_type_label == "allocate" and executed_tid:
+                _allocated.add(executed_tid)
+                # Mark resource as used locally to avoid double-assignment
+                res_id = action_payload.get("allocation", {}).get("resource_id")
+                if res_id is not None:
+                    for r in resources:
+                        if r["resource_id"] == res_id:
+                            r["is_available"] = False
 
             # Re-allow re-coordination if new threats appear
             new_active_ids = {t["threat_id"] for t in threats if t.get("status") == "active"}
@@ -498,6 +524,7 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
         "allocation":     state.get("allocation_score", 0.0),
         "coordination":   state.get("coordination_score", 0.0),
         "rescue":         state.get("rescue_score", 0.0),
+        "evacuation":     state.get("evacuation_score", 0.0),
         "final":          state.get("final_score", 0.0),
     }
 
