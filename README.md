@@ -436,7 +436,7 @@ The tests cover `reset()`, `step()` logic for all action types, grader score ran
 ...
 [STEP 34] action=coordinate | target=rebalance | result=priority-refresh | reward=0.4200 | done=True
 [END]
-[SCORE] classification=0.9167 | prediction=0.8628 | allocation=0.8967 | coordination=0.9330 | rescue=0.8143 | final=0.8847
+[SCORE] classification=0.9167 | prediction=0.8628 | allocation=0.8967 | coordination=0.9330 | rescue=0.8143 | evacuation=0.8500 | final=0.8847
 ```
 
 **Baseline scores (multi-seed):**

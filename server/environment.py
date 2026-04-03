@@ -111,7 +111,7 @@ class CrisisEnvironment:
         # Per-task grading accumulators
         # Classification
         self._classify_attempts:  int   = 0
-        self._classify_correct:   int   = 0
+        self._classify_correct:   float = 0.0
 
         # Prediction
         self._predict_attempts:   int   = 0
@@ -155,7 +155,7 @@ class CrisisEnvironment:
         self._casualties_prevented = 0
 
         self._classify_attempts = 0
-        self._classify_correct  = 0
+        self._classify_correct  = 0.0
         self._predict_attempts  = 0
         self._predict_errors    = []
         self._alloc_attempts    = 0

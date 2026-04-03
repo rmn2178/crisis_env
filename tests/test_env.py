@@ -14,7 +14,7 @@ from server.environment import CrisisEnvironment, TOTAL_STEPS
 from models import (
     ActionType, ThreatType, CrisisAction, CrisisObservation, StepResult,
     ClassificationPayload, PredictionPayload, AllocationPayload,
-    CoordinationPayload, RescuePayload,
+    CoordinationPayload, RescuePayload, EvacuationPayload,
 )
 
 
@@ -183,6 +183,15 @@ def test_grader_scores_in_range(env):
         rescue=RescuePayload(zone_id=1, rescue_units_to_send=3),
     ))
 
+    # Evacuate (task 6)
+    env.step(CrisisAction(
+        action_type=ActionType.EVACUATE,
+        evacuate=EvacuationPayload(
+            threat_id=threat.threat_id,
+            evac_units=5,
+        ),
+    ))
+
     state = env.state()
 
     for score_name in [
@@ -191,6 +200,7 @@ def test_grader_scores_in_range(env):
         "allocation_score",
         "coordination_score",
         "rescue_score",
+        "evacuation_score",
     ]:
         score = getattr(state, score_name)
         assert 0.0 <= score <= 1.0, f"{score_name}={score} is out of [0.0, 1.0]"
@@ -263,7 +273,7 @@ def test_evacuate_action_reduces_population(env):
 
     action = CrisisAction(
         action_type="evacuate",
-        evacuate=__import__("models", fromlist=["EvacuationPayload"]).EvacuationPayload(
+        evacuate=EvacuationPayload(
             threat_id=threat.threat_id,
             evac_units=5,
         ),
