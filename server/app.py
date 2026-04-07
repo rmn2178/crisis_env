@@ -138,7 +138,7 @@ async def list_tasks():
             {
                 "task_id":    3,
                 "name":       "Resource Allocation",
-                "difficulty": "hard",
+                "difficulty": "medium_plus",
                 "action_type": ActionType.ALLOCATE,
                 "description": (
                     "Assign the best available resource unit to each threat, "
@@ -161,7 +161,7 @@ async def list_tasks():
             {
                 "task_id":    5,
                 "name":       "Rescue Optimisation",
-                "difficulty": "hard",
+                "difficulty": "advanced",
                 "action_type": ActionType.RESCUE,
                 "description": (
                     "Deploy rescue units into impacted zones to save victims. "
@@ -169,30 +169,7 @@ async def list_tasks():
                 ),
                 "grader_range": [0.0, 1.0],
             },
-            {
-                "task_id":    6,
-                "name":       "Proactive Evacuation",
-                "difficulty": "medium",
-                "action_type": ActionType.EVACUATE,
-                "description": (
-                    "Proactively evacuate civilians before a threat impacts to reduce casualties."
-                ),
-                "grader_range": [0.0, 1.0],
-            },
         ]
-    }
-
-
-@app.get("/validate", tags=["System"])
-async def validate_endpoint():
-    """OpenEnv self-validation check."""
-    return {
-        "status": "ok",
-        "openenv_yaml": "present",
-        "endpoints": ["POST /reset", "POST /step", "GET /state", "GET /health", "GET /tasks"],
-        "task_count": 6,
-        "grader_score_range": [0.0, 1.0],
-        "spec_version": "1.0"
     }
 
 
@@ -200,14 +177,15 @@ async def validate_endpoint():
 async def reset_endpoint(body: Optional[Dict[str, Any]] = None):
     """
     Reset the environment and return the initial observation.
-    Optional body: { "seed": <int>, "session_id": <str> }
+    Optional body: { "seed": <int>, "difficulty": <str>, "session_id": <str> }
     """
     body       = body or {}
     seed       = body.get("seed", None)
+    difficulty = body.get("difficulty", "medium")
     session_id = body.get("session_id", _DEFAULT_SESSION)
 
     env = _new_env(session_id=session_id, seed=seed)
-    obs = env.reset()
+    obs = env.reset(seed=seed, difficulty=difficulty)
     return {"status": "ok", "observation": _obs_to_dict(obs)}
 
 
@@ -248,23 +226,21 @@ async def state_endpoint(session_id: str = _DEFAULT_SESSION):
 @app.get("/scores", tags=["OpenEnv"])
 async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
     """
-    Convenience endpoint returning only the grader scores for all 6 tasks.
+    Convenience endpoint returning only the grader scores for all 5 tasks.
     Used by automated evaluation harness.
     """
     env   = _get_env(session_id)
     state = env.state()
     return {
-        "task_scores": {
-            "classification": state.classification_score,
-            "prediction":     state.prediction_score,
-            "allocation":     state.allocation_score,
-            "coordination":   state.coordination_score,
-            "rescue":         state.rescue_score,
-            "evacuation":     state.evacuation_score,
-        },
-        "final_score":       state.final_score,
-        "episode_id":        state.episode_id,
-        "done":              state.done,
+        "classification": round(state.classification_score, 4),
+        "prediction":     round(state.prediction_score,     4),
+        "allocation":     round(state.allocation_score,     4),
+        "coordination":   round(state.coordination_score,   4),
+        "rescue":         round(state.rescue_score,         4),
+        "final":          round(state.final_score,          4),
+        "final_score":    round(state.final_score,          4),
+        "episode_id":     state.episode_id,
+        "done":           state.done,
     }
 
 
@@ -370,6 +346,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 tasks_resp = await list_tasks()
                 await send("tasks", tasks_resp)
 
+            # ── SCORES ────────────────────────────────────────────────────
+            elif command == "scores":
+                env = _get_env(session_id)
+                task_scores = env.task_scores()
+                st = env.state()
+                await send("scores", {
+                    "classification": round(task_scores.get("classification", 0.0), 4),
+                    "prediction":     round(task_scores.get("prediction",     0.0), 4),
+                    "allocation":     round(task_scores.get("allocation",     0.0), 4),
+                    "coordination":   round(task_scores.get("coordination",   0.0), 4),
+                    "rescue":         round(task_scores.get("rescue",         0.0), 4),
+                    "final":          round(st.final_score, 4),
+                })
+
             # ── UNKNOWN ───────────────────────────────────────────────────
             else:
                 await send("error", _error_response(
@@ -420,6 +410,11 @@ async def generic_exception_handler(request, exc: Exception):
 # ENTRY POINT (for local dev)
 # ─────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the server (used by [project.scripts] in pyproject.toml)."""
     import uvicorn
     uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,50 +1,80 @@
 #!/usr/bin/env python3
 """
-test_determinism.py — Verifies the environment produces identical 
-outputs across 3 runs with the same seed.
+test_determinism.py — Tests that the environment produces deterministic results.
+Runs the same episode 3 times with the same seed and verifies identical outputs.
 """
+
 import subprocess
 import sys
-import os
+import json
 
 SEED = 42
 NUM_RUNS = 3
 
 
 def run_episode(seed: int) -> dict:
+    """Run inference.py and capture scores."""
     env = {"SEED": str(seed), "PYTHONPATH": "."}
     result = subprocess.run(
         ["python3", "inference.py"],
-        capture_output=True, text=True,
-        env={**os.environ.copy(), **env},
+        capture_output=True,
+        text=True,
+        env={**subprocess.os.environ.copy(), **env},
+        cwd=subprocess.os.path.dirname(__file__) or ".",
     )
-    scores = {}
-    for line in result.stdout.split("\n"):
+    
+    output = result.stdout
+    for line in output.split("\n"):
         if "[SCORE]" in line:
+            scores = {}
             for part in line.split("|"):
                 if "=" in part:
-                    key, val = part.split("=", 1)
+                    key, val = part.split("=")
                     key = key.strip().replace("[SCORE] ", "")
                     try:
                         scores[key] = float(val.strip())
                     except ValueError:
                         pass
-    return scores
+            return scores
+    return {}
 
 
 def main():
-    print(f"Determinism test: seed={SEED}, {NUM_RUNS} runs\n")
-    all_scores = [run_episode(SEED) for i in range(NUM_RUNS)
-                  if print(f"Run {i+1}/{NUM_RUNS}...") or True]
+    print(f"Running determinism test with seed={SEED}, {NUM_RUNS} times...\n")
+    
+    all_scores = []
+    for i in range(NUM_RUNS):
+        print(f"Run {i+1}/{NUM_RUNS}...")
+        scores = run_episode(SEED)
+        all_scores.append(scores)
+        print(f"  Final Score: {scores.get('final', 'N/A')}")
+    
+    if len(all_scores) < NUM_RUNS:
+        print("\n[ERROR] Not all runs completed successfully")
+        sys.exit(1)
+    
+    print("\n--- Results ---")
+    for i, scores in enumerate(all_scores):
+        print(f"Run {i+1}: {scores}")
+    
     baseline = all_scores[0]
-    all_match = all(
-        all(abs(s.get(k, 0) - baseline.get(k, 0)) < 0.0001 for k in baseline)
-        for s in all_scores[1:]
-    )
-    for i, s in enumerate(all_scores):
-        print(f"Run {i+1}: final={s.get('final', 'N/A')}")
-    print(f"\nDeterministic: {'PASS' if all_match else 'FAIL'}")
-    sys.exit(0 if all_match else 1)
+    all_match = True
+    
+    for key in baseline:
+        values = [s.get(key, None) for s in all_scores]
+        if None in values:
+            all_match = False
+            continue
+        if not all(abs(v - values[0]) < 0.0001 for v in values):
+            all_match = False
+            print(f"MISMATCH: {key} -> {values}")
+    
+    if all_match:
+        print("\nDeterministic: PASS")
+        sys.exit(0)
+    else:
+        print("\nDeterministic: FAIL")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -22,14 +22,13 @@ environment:
   protocol: http+websocket
 
 endpoints:
-  reset:    POST /reset
-  step:     POST /step
-  state:    GET  /state
-  health:   GET  /health
-  validate: GET  /validate
-  tasks:    GET  /tasks
-  scores:   GET  /scores
-  ws:       WS   /ws
+  reset:   POST /reset
+  step:    POST /step
+  state:   GET  /state
+  health:  GET  /health
+  tasks:   GET  /tasks
+  scores:  GET  /scores
+  ws:      WS   /ws
 
 observation_space:
   type: structured
@@ -69,7 +68,7 @@ action_space:
       description: Deploy rescue units into an impacted zone
       payload: RescuePayload
     - name: evacuate
-      description: Proactively evacuate civilians before impact
+      description: Proactive evacuation before impact to reduce casualties
       payload: EvacuationPayload
 
 tasks:
@@ -81,8 +80,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Correctly identify the type and severity of each active threat.
-      Score = correct_predictions / total_predictions.
-
+      Score = 0.55 × exact_match + 0.25 × domain_match + 0.20 × severity_accuracy.
   - id: 2
     name: Impact Prediction
     difficulty: medium
@@ -91,18 +89,16 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Predict time-to-impact and population affected for each threat.
-      Score = 1 - normalised_error.
-
+      Score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio).
   - id: 3
     name: Resource Allocation
-    difficulty: hard
+    difficulty: medium_plus
     action: allocate
     grader: allocation_score
     score_range: [0.0, 1.0]
     description: >
       Assign the most effective zone-matched resource to each threat.
-      Score = mean(allocation_quality_scores).
-
+      Score = 0.45 × type_compatibility + 0.30 × intercept_prob + 0.15 × budget_efficiency + 0.10 × proximity.
   - id: 4
     name: Multi-Threat Coordination
     difficulty: hard
@@ -111,46 +107,39 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Set optimal priority ordering across all simultaneous threats.
-      Score = weighted rank-correlation vs ideal severity×pop/TTI ordering.
-
+      Score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided.
   - id: 5
     name: Rescue Optimisation
-    difficulty: hard
+    difficulty: advanced
     action: rescue
     grader: rescue_score
     score_range: [0.0, 1.0]
     description: >
       Deploy rescue units into impacted zones to maximise lives saved.
-      Score = (lives_saved_ratio + speed_score + resource_efficiency) / 3.
-
-  - id: 6
-    name: Proactive Evacuation
-    difficulty: medium
-    action: evacuate
-    grader: evacuation_score
-    score_range: [0.0, 1.0]
-    description: >
-      Proactively evacuate civilians before a threat impacts to reduce casualties.
-
+      Score = 0.40 × victims_saved + 0.25 × unit_efficiency + 0.20 × speed_score + 0.15 × unit_type_match.
 reward:
   internal_range: [-inf, +inf]
   final_score_range: [0.0, 1.0]
   shaping:
-    - correct_classification:    +1.0
-    - wrong_classification:      -0.3
-    - accurate_prediction:       +1.0 (proportional)
-    - good_allocation:           +0.8 to +1.3 (zone match bonus)
-    - good_coordination:         +0.0 to +1.5
-    - rescue_save:               +proportional to victims saved
-    - threat_contained:          +2.0
-    - threat_resolved:           +1.0
-    - casualty_per_person:       -0.002
-    - terminal_survival_bonus:   +0.0 to +5.0
-    - terminal_resolve_bonus:    +0.0 to +3.0
+    - correct_classification:    +1.0 to +1.5 (dense progress)
+    - accurate_prediction:       +1.0 to +1.3
+    - good_allocation:           +1.0 to +2.0 (zone/priority boosted)
+    - good_coordination:         +1.0 to +2.0
+    - rescue_save:               +1.5 to +3.0 (saved_ratio*0.75)
+    - threat_contained:          +3.0
+    - baseline_step:             +0.10 (anti-zero rewards)
+    - terminal_bonus:            +2.0 * final_score
 
 episode:
-  max_steps: 50
+  max_steps: 30
+  easy_steps: 22
+  medium_steps: 26
+  hard_steps: 30
   simultaneous_threats: 3
+  difficulty_profiles:
+    easy:   { threats: 2, obs_noise: 0.08, budget: 10 }
+    medium: { threats: 3, obs_noise: 0.16, budget: 9 }
+    hard:   { threats: 4, obs_noise: 0.24, budget: 8 }
   resource_units: 8
 
 inference:
@@ -159,5 +148,7 @@ inference:
     - API_BASE_URL
     - MODEL_NAME
     - HF_TOKEN
+    - SEED
+    - USE_LLM
   runtime_limit_minutes: 20
   machine: vcpu=2, memory=8gb

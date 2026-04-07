@@ -1,28 +1,29 @@
-"""
-utils.py — RL helpers for training and evaluating agents locally against the
-existing CrisisEnvironment without changing the OpenEnv API.
-"""
-
 from __future__ import annotations
 
 import json
-import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from models import CrisisAction
 from server.environment import (
-    CrisisEnvironment,
+    ACTION_TYPE_ORDER,
     MAX_RESCUE_UNITS,
-    RESOURCE_MATCH_BONUS,
+    MAX_THREATS_VISIBLE,
+    STRATEGIES,
     TOTAL_STEPS,
     ZONE_RESOURCE_AFFINITY,
+    CrisisEnvironment,
 )
+
+
+# ─────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────
 
 THREAT_TYPES: List[str] = [
     "airstrike",
@@ -33,6 +34,7 @@ THREAT_TYPES: List[str] = [
     "fire",
 ]
 THREAT_STATUSES: List[str] = ["active", "impacted", "contained", "resolved"]
+RISK_LEVELS: List[str] = ["low", "medium", "high"]
 RESOURCE_TYPES: List[str] = [
     "military_unit",
     "coast_guard",
@@ -43,26 +45,39 @@ RESOURCE_TYPES: List[str] = [
     "evacuation_bus",
 ]
 ZONE_TYPES: List[str] = ["military", "maritime", "urban", "rural"]
-ACTION_TYPES: List[str] = ["classify", "predict", "allocate", "coordinate", "rescue", "evacuate"]
 
-MAX_THREATS = 3
+ACTION_TYPES: List[str] = list(ACTION_TYPE_ORDER)
+STRATEGY_TYPES: List[str] = list(STRATEGIES)
+
+MAX_THREATS = MAX_THREATS_VISIBLE
 MAX_RESOURCES = 8
-MAX_ZONES = 3
+MAX_ZONES = MAX_THREATS_VISIBLE
+
+THREAT_FEATURES = 29
+RESOURCE_FEATURES = 15
+ZONE_FEATURES = 11
+GLOBAL_FEATURES = 14
+RECENT_ACTION_STEPS = 4
+
+STATE_DIM = (
+    GLOBAL_FEATURES
+    + MAX_THREATS * THREAT_FEATURES
+    + MAX_RESOURCES * RESOURCE_FEATURES
+    + MAX_ZONES * ZONE_FEATURES
+    + RECENT_ACTION_STEPS * len(ACTION_TYPES)
+    + len(ACTION_TYPES)
+    + MAX_RESCUE_UNITS
+    + len(STRATEGY_TYPES)
+)
 
 
-@dataclass
-class CandidateAction:
-    """One concrete OpenEnv action plus numeric features for policy scoring."""
-
-    action: Dict[str, Any]
-    features: List[float]
-    label: str
+# ─────────────────────────────────────────────
+# DATA STRUCTURES
+# ─────────────────────────────────────────────
 
 
 @dataclass
 class EpisodeSummary:
-    """Compact rollout summary used by training and evaluation scripts."""
-
     total_reward: float
     final_score: float
     task_scores: Dict[str, float]
@@ -70,15 +85,20 @@ class EpisodeSummary:
 
 
 class TrainingLogger:
-    """Small JSONL logger for reward and score tracking over training."""
-
-    def __init__(self, log_path: Path):
+    def __init__(self, log_path: Path, clear: bool = True):
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if clear and self.log_path.exists():
+            self.log_path.unlink()
 
     def write(self, payload: Dict[str, Any]) -> None:
-        with self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+# ─────────────────────────────────────────────
+# SEEDING & HELPERS
+# ─────────────────────────────────────────────
 
 
 def set_global_seed(seed: int) -> None:
@@ -106,6 +126,11 @@ def compute_discounted_returns(rewards: Sequence[float], gamma: float) -> List[f
     return returns
 
 
+# ─────────────────────────────────────────────
+# CHECKPOINT I/O
+# ─────────────────────────────────────────────
+
+
 def save_checkpoint(
     checkpoint_path: Path,
     model: torch.nn.Module,
@@ -129,11 +154,16 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint.get("metadata", {})
+
+
+# ─────────────────────────────────────────────
+# OBSERVATION / STATE CONVERSION
+# ─────────────────────────────────────────────
 
 
 def observation_to_dict(observation: Any) -> Dict[str, Any]:
@@ -152,13 +182,17 @@ def state_to_metrics(state: Any) -> Dict[str, float]:
         "allocation": float(payload.get("allocation_score", 0.0)),
         "coordination": float(payload.get("coordination_score", 0.0)),
         "rescue": float(payload.get("rescue_score", 0.0)),
-        "evacuation": float(payload.get("evacuation_score", 0.0)),
         "final": float(payload.get("final_score", 0.0)),
     }
 
 
+# ─────────────────────────────────────────────
+# NUMERIC HELPERS
+# ─────────────────────────────────────────────
+
+
 def _one_hot(value: Optional[str], categories: Sequence[str]) -> List[float]:
-    return [1.0 if value == category else 0.0 for category in categories]
+    return [1.0 if value == c else 0.0 for c in categories]
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -171,503 +205,637 @@ def _norm(value: float, scale: float, cap: float = 1.5) -> float:
     return _clamp(float(value) / scale, 0.0, cap)
 
 
-def _priority_score(threat: Dict[str, Any]) -> float:
-    severity = float(threat.get("severity", 0.0))
-    population = int(threat.get("population_at_risk", 0))
-    tti = max(int(threat.get("time_to_impact", 1)), 1)
-    return (severity * population) / tti
+# ─────────────────────────────────────────────
+# ACTION MASKING
+# ─────────────────────────────────────────────
 
 
-def _optimal_priority_order(threats: Sequence[Dict[str, Any]]) -> List[int]:
-    ranked = sorted(threats, key=_priority_score, reverse=True)
-    return [int(threat["threat_id"]) for threat in ranked]
+def build_valid_action_mask(observation: Any) -> Dict[str, Any]:
+    obs = observation_to_dict(observation)
+    provided = obs.get("valid_actions")
+
+    threat_ids = []
+    for t_raw in obs.get("threats", []):
+        tid_raw = t_raw.get("threat_id")
+        if isinstance(tid_raw, (int, str)):
+            try:
+                tid = int(tid_raw)
+                if t_raw.get("status") == "active":
+                    threat_ids.append(tid)
+            except (ValueError, TypeError):
+                pass
+    threats = [t for t in obs.get("threats", []) if t.get("threat_id") in threat_ids]
+
+    resource_ids = []
+    for r_raw in obs.get("resources", []):
+        rid_raw = r_raw.get("resource_id")
+        if isinstance(rid_raw, (int, str)):
+            try:
+                rid = int(rid_raw)
+                if r_raw.get("is_available", False):
+                    resource_ids.append(rid)
+            except (ValueError, TypeError):
+                pass
+    resources = [r for r in obs.get("resources", []) if r.get("resource_id") in resource_ids]
+
+    zone_ids = []
+    for z_raw in obs.get("affected_zones", []):
+        zid_raw = z_raw.get("zone_id")
+        if isinstance(zid_raw, (int, str)):
+            try:
+                zid = int(zid_raw)
+                if z_raw.get("is_active", False):
+                    zone_ids.append(zid)
+            except (ValueError, TypeError):
+                pass
+    zones = [z for z in obs.get("affected_zones", []) if z.get("zone_id") in zone_ids]
+
+    budget_remaining = int(obs.get("resource_budget_remaining", 0))
+
+    if isinstance(provided, dict) and provided.get("action_mask"):
+        raw_action_mask = list(provided.get("action_mask", []))
+        if len(raw_action_mask) != len(ACTION_TYPES):
+            raw_action_mask = [1] * len(ACTION_TYPES)
+    else:
+        active_threats = [t for t in obs.get("threats", []) if t.get("status") == "active"]
+        unallocated_threats = [t for t in active_threats if t.get("assigned_resource") is None]
+        unclassified_threats = [t for t in active_threats if t.get("predicted_severity") is None]
+        unpredicted_threats = [t for t in active_threats if t.get("predicted_tti") is None]
+        
+        # Prevent redundant coordination if recent and no new threats
+        recent = [str(a) for a in obs.get("recent_actions", [])]
+        coordinated_recently = "coordinate" in recent
+        
+        action_enabled = {
+            "classify": int(bool(unclassified_threats)),
+            "predict": int(bool(unpredicted_threats)),
+            "allocate": int(bool(unallocated_threats and resources and budget_remaining > 0)),
+            "coordinate": int(len(active_threats) >= 2 and not coordinated_recently),
+            "rescue": int(bool(zones and budget_remaining > 0)),
+            "skip": 1,
+            "delay": int(bool(active_threats)),
+        }
+        raw_action_mask = [action_enabled.get(a, 1) for a in ACTION_TYPES]
+
+    threat_ids = [int(t["threat_id"]) for t in threats[:MAX_THREATS] if isinstance(t.get("threat_id"), (int, str))]
+    resource_ids = [int(r["resource_id"]) for r in resources[:MAX_RESOURCES] if isinstance(r.get("resource_id"), (int, str))]
+    zone_ids = [int(z["zone_id"]) for z in zones[:MAX_ZONES] if isinstance(z.get("zone_id"), (int, str))]
+
+    threat_mask = [1] * len(threat_ids) + [0] * (MAX_THREATS - len(threat_ids))
+    resource_mask = [1] * len(resource_ids) + [0] * (MAX_RESOURCES - len(resource_ids))
+    zone_mask = [1] * len(zone_ids) + [0] * (MAX_ZONES - len(zone_ids))
+
+    max_units = int(provided.get("max_rescue_units", 0)) if isinstance(provided, dict) else min(MAX_RESCUE_UNITS, max(0, budget_remaining))
+    max_units = max(0, min(max_units, MAX_RESCUE_UNITS))
+    units_mask = [1 if i < max_units else 0 for i in range(MAX_RESCUE_UNITS)]
+
+    strategy_mask = [1] * len(STRATEGY_TYPES)
+
+    return {
+        "action_types": list(ACTION_TYPES),
+        "action_mask": raw_action_mask,
+        "threat_ids": threat_ids,
+        "threat_mask": threat_mask,
+        "resource_ids": resource_ids,
+        "resource_mask": resource_mask,
+        "zone_ids": zone_ids,
+        "zone_mask": zone_mask,
+        "units_mask": units_mask,
+        "strategy_mask": strategy_mask,
+    }
 
 
-def _resource_match(threat: Dict[str, Any], resource: Dict[str, Any]) -> bool:
-    affinity = ZONE_RESOURCE_AFFINITY.get(threat["zone"], [])
-    return resource["resource_type"] in affinity
-
-
-def _best_resource(threat: Dict[str, Any], resources: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    available = [resource for resource in resources if resource.get("is_available", False)]
-    if not available:
-        return None
-
-    def score(resource: Dict[str, Any]) -> float:
-        match_bonus = RESOURCE_MATCH_BONUS if _resource_match(threat, resource) else 0.0
-        return float(resource.get("effectiveness", 0.0)) + match_bonus
-
-    return max(available, key=score)
+# ─────────────────────────────────────────────
+# STATE VECTOR ENCODING
+# ─────────────────────────────────────────────
 
 
 def build_state_vector(observation: Any) -> np.ndarray:
     obs = observation_to_dict(observation)
-    threats = {
-        int(threat["threat_id"]): threat
-        for threat in obs.get("threats", [])
-    }
-    resources = {
-        int(resource["resource_id"]): resource
-        for resource in obs.get("resources", [])
-    }
-    zones = {
-        int(zone["zone_id"]): zone
-        for zone in obs.get("affected_zones", [])
-    }
+    mask = build_valid_action_mask(obs)
 
-    active_threats = sum(1 for threat in threats.values() if threat.get("status") == "active")
-    impacted_threats = sum(1 for threat in threats.values() if threat.get("status") == "impacted")
-    resolved_threats = sum(
-        1 for threat in threats.values() if threat.get("status") in {"contained", "resolved"}
-    )
-    available_resources = sum(
-        1 for resource in resources.values() if resource.get("is_available", False)
-    )
-    active_zones = sum(1 for zone in zones.values() if zone.get("is_active", False))
+    threats = {int(t["threat_id"]): t for t in obs.get("threats", [])}
+    resources = {int(r["resource_id"]): r for r in obs.get("resources", [])}
+    zones = {int(z["zone_id"]): z for z in obs.get("affected_zones", [])}
 
-    features: List[float] = [
+    active_threats = [t for t in threats.values() if t.get("status") == "active"]
+    impacted_threats = [t for t in threats.values() if t.get("status") == "impacted"]
+    resolved_threats = [t for t in threats.values() if t.get("status") in {"contained", "resolved"}]
+    available_resources = [r for r in resources.values() if r.get("is_available", False)]
+    active_zones = [z for z in zones.values() if z.get("is_active", False)]
+
+    mean_sev_unc = float(np.mean([t.get("severity_uncertainty", 0.0) for t in active_threats])) if active_threats else 0.0
+    mean_pop_unc = float(np.mean([t.get("population_uncertainty", 0.0) for t in active_threats])) if active_threats else 0.0
+    mean_tti_unc = float(np.mean([t.get("tti_uncertainty", 0.0) for t in active_threats])) if active_threats else 0.0
+
+    budget_remaining = float(obs.get("resource_budget_remaining", 0))
+    budget_total = float(obs.get("resource_budget_total", 1))
+
+    global_features: List[float] = [
         _norm(obs.get("time_remaining", 0), TOTAL_STEPS),
         _norm(obs.get("current_step", 0), TOTAL_STEPS),
-        _norm(active_threats, MAX_THREATS),
-        _norm(impacted_threats, MAX_THREATS),
-        _norm(resolved_threats, MAX_THREATS),
-        _norm(available_resources, MAX_RESOURCES),
-        _norm(active_zones, MAX_ZONES),
+        _norm(len(active_threats), MAX_THREATS),
+        _norm(len(impacted_threats), MAX_THREATS),
+        _norm(len(resolved_threats), MAX_THREATS),
+        _norm(len(available_resources), MAX_RESOURCES),
+        _norm(len(active_zones), MAX_ZONES),
+        _norm(budget_remaining, max(budget_total, 1.0)),
+        _norm(budget_total, 8.0),
+        _clamp(mean_sev_unc),
+        _clamp(mean_pop_unc),
+        _clamp(mean_tti_unc),
+        float(mask["action_mask"][ACTION_TYPES.index("rescue")]),
+        float(mask["action_mask"][ACTION_TYPES.index("allocate")]),
     ]
 
-    for threat_id in range(1, MAX_THREATS + 1):
-        threat = threats.get(threat_id)
+    features: List[float] = list(global_features)
+
+    # Threat slots (stable sorted by id)
+    for tid in range(1, MAX_THREATS + 1):
+        t = threats.get(tid)
+        if t is None:
+            features.extend([0.0] * THREAT_FEATURES)
+            continue
+
+        features.extend([
+            1.0,
+            *_one_hot(t.get("status"), THREAT_STATUSES),
+            *_one_hot(t.get("threat_type"), THREAT_TYPES),
+            *_one_hot(t.get("zone"), ZONE_TYPES),
+            _norm(t.get("severity", 0.0), 10.0),
+            _norm(t.get("population_at_risk", 0), 2000.0, cap=2.0),
+            _norm(t.get("time_to_impact", 0), TOTAL_STEPS),
+            _clamp(float(t.get("severity_uncertainty", 0.0))),
+            _clamp(float(t.get("population_uncertainty", 0.0))),
+            _clamp(float(t.get("tti_uncertainty", 0.0))),
+            1.0 if t.get("assigned_resource") is not None else 0.0,
+            1.0 if t.get("predicted_severity") is not None else 0.0,
+            1.0 if t.get("predicted_tti") is not None else 0.0,
+            1.0 if t.get("predicted_pop") is not None else 0.0,
+            _norm(t.get("priority_score", 0.0), 1200.0, cap=2.0),
+            *_one_hot(t.get("risk_level"), RISK_LEVELS),
+        ])
+
+    # Resource slots
+    for rid in range(1, MAX_RESOURCES + 1):
+        r = resources.get(rid)
+        if r is None:
+            features.extend([0.0] * RESOURCE_FEATURES)
+            continue
+
+        features.extend([
+            1.0,
+            1.0 if r.get("is_available", False) else 0.0,
+            *_one_hot(r.get("resource_type"), RESOURCE_TYPES),
+            *_one_hot(r.get("location_zone"), ZONE_TYPES),
+            _norm(r.get("effectiveness", 0.0), 1.0),
+            _norm(r.get("cooldown_steps", 0), 5.0),
+        ])
+
+    # Zone slots
+    for zid in range(1, MAX_ZONES + 1):
+        z = zones.get(zid)
+        if z is None:
+            features.extend([0.0] * ZONE_FEATURES)
+            continue
+
+        total = max(int(z.get("total_victims", 0)), 1)
+        rescued = int(z.get("rescued", 0))
+        remaining = max(total - rescued, 0)
+
+        features.extend([
+            1.0,
+            1.0 if z.get("is_active", False) else 0.0,
+            *_one_hot(z.get("zone_type"), ZONE_TYPES),
+            _norm(total, 1500.0, cap=2.0),
+            _norm(rescued, 1500.0, cap=2.0),
+            _norm(remaining, 1500.0, cap=2.0),
+            _norm(z.get("rescue_units_deployed", 0), 20.0),
+            _norm(z.get("evacuated", 0), 1500.0, cap=2.0),
+        ])
+
+    # Recent actions memory
+    recent = [str(a) for a in obs.get("recent_actions", [])][-RECENT_ACTION_STEPS:]
+    recent = ["skip"] * (RECENT_ACTION_STEPS - len(recent)) + recent
+    for act in recent:
+        features.extend(_one_hot(act, ACTION_TYPES))
+
+    # Action mask, units mask, strategy prior
+    features.extend([float(v) for v in mask["action_mask"]])
+    features.extend([float(v) for v in mask["units_mask"]])
+    features.extend([1.0 / len(STRATEGY_TYPES)] * len(STRATEGY_TYPES))
+
+    arr = np.asarray(features, dtype=np.float32)
+    if arr.shape[0] != STATE_DIM:
+        raise ValueError(f"State vector size mismatch: expected {STATE_DIM}, got {arr.shape[0]}")
+    return arr
+
+
+# ─────────────────────────────────────────────
+# ACTION DECODING / ENCODING
+# ─────────────────────────────────────────────
+
+
+def decode_action(
+    obs_dict: Dict[str, Any],
+    strategy_idx: int,
+    action_type_idx: int,
+    threat_idx: int,
+    resource_idx: int,
+    zone_idx: int,
+    units_idx: int,
+    severity_idx: int,
+    tti_idx: int,
+    pop_idx: int,
+) -> Dict[str, Any]:
+    mask = build_valid_action_mask(obs_dict)
+
+    strategy = STRATEGY_TYPES[min(max(strategy_idx, 0), len(STRATEGY_TYPES) - 1)]
+    action_type = ACTION_TYPES[min(max(action_type_idx, 0), len(ACTION_TYPES) - 1)]
+
+    if mask["action_mask"][ACTION_TYPES.index(action_type)] == 0:
+        action_type = "skip"
+
+    threat_ids = mask["threat_ids"]
+    resource_ids = mask["resource_ids"]
+    zone_ids = mask["zone_ids"]
+
+    selected_threat = threat_ids[min(threat_idx, len(threat_ids) - 1)] if threat_ids else None
+    selected_resource = resource_ids[min(resource_idx, len(resource_ids) - 1)] if resource_ids else None
+    selected_zone = zone_ids[min(zone_idx, len(zone_ids) - 1)] if zone_ids else None
+
+    if action_type == "classify" and selected_threat is not None:
+        threat = next((t for t in obs_dict.get("threats", []) if int(t.get("threat_id", -1)) == selected_threat), None)
         if threat is None:
-            features.extend([0.0] * 22)
-            continue
-
-        features.extend(
-            [
-                1.0,
-                *_one_hot(threat.get("status"), THREAT_STATUSES),
-                *_one_hot(threat.get("threat_type"), THREAT_TYPES),
-                *_one_hot(threat.get("zone"), ZONE_TYPES),
-                _norm(threat.get("severity", 0.0), 10.0),
-                _norm(threat.get("population_at_risk", 0), 1000.0, cap=2.0),
-                _norm(threat.get("time_to_impact", 0), TOTAL_STEPS),
-                1.0 if threat.get("predicted_severity") is not None else 0.0,
-                1.0 if threat.get("predicted_tti") is not None else 0.0,
-                1.0 if threat.get("assigned_resource") is not None else 0.0,
-                _norm(threat.get("priority_rank") or 0, MAX_THREATS),
-                _norm(threat.get("casualties", 0), 1000.0, cap=2.0),
-                _norm(threat.get("casualties_prevented", 0), 1000.0, cap=2.0),
-            ]
-        )
-
-    for resource_id in range(1, MAX_RESOURCES + 1):
-        resource = resources.get(resource_id)
-        if resource is None:
-            features.extend([0.0] * 15)
-            continue
-
-        features.extend(
-            [
-                1.0,
-                1.0 if resource.get("is_available", False) else 0.0,
-                *_one_hot(resource.get("resource_type"), RESOURCE_TYPES),
-                *_one_hot(resource.get("location_zone"), ZONE_TYPES),
-                _norm(resource.get("effectiveness", 0.0), 1.0),
-                1.0 if resource.get("assigned_to") is not None else 0.0,
-            ]
-        )
-
-    for zone_id in range(1, MAX_ZONES + 1):
-        zone = zones.get(zone_id)
-        if zone is None:
-            features.extend([0.0] * 10)
-            continue
-
-        remaining = max(int(zone.get("total_victims", 0)) - int(zone.get("rescued", 0)), 0)
-        total_victims = max(int(zone.get("total_victims", 0)), 1)
-        features.extend(
-            [
-                1.0,
-                1.0 if zone.get("is_active", False) else 0.0,
-                *_one_hot(zone.get("zone_type"), ZONE_TYPES),
-                _norm(zone.get("total_victims", 0), 1000.0, cap=2.0),
-                _norm(zone.get("rescued", 0), 1000.0, cap=2.0),
-                _norm(remaining, 1000.0, cap=2.0),
-                _norm(zone.get("rescue_units_deployed", 0), 15.0),
-            ]
-        )
-
-    return np.asarray(features, dtype=np.float32)
-
-
-def _candidate_features(
-    action_type: str,
-    threat: Optional[Dict[str, Any]] = None,
-    resource: Optional[Dict[str, Any]] = None,
-    zone: Optional[Dict[str, Any]] = None,
-    units: int = 0,
-    priority_order: Optional[Sequence[int]] = None,
-) -> List[float]:
-    threat_features: List[float] = [0.0] * 12
-    if threat is not None:
-        threat_features = [
-            _norm(threat.get("threat_id", 0), MAX_THREATS),
-            _norm(threat.get("severity", 0.0), 10.0),
-            _norm(threat.get("population_at_risk", 0), 1000.0, cap=2.0),
-            _norm(threat.get("time_to_impact", 0), TOTAL_STEPS),
-            *_one_hot(threat.get("status"), THREAT_STATUSES),
-            *_one_hot(threat.get("zone"), ZONE_TYPES),
-        ]
-
-    resource_features: List[float] = [0.0] * 15
-    if resource is not None:
-        resource_features = [
-            _norm(resource.get("resource_id", 0), MAX_RESOURCES),
-            _norm(resource.get("effectiveness", 0.0), 1.0),
-            1.0 if resource.get("is_available", False) else 0.0,
-            1.0 if threat is not None and _resource_match(threat, resource) else 0.0,
-            *_one_hot(resource.get("resource_type"), RESOURCE_TYPES),
-            *_one_hot(resource.get("location_zone"), ZONE_TYPES),
-        ]
-
-    zone_features: List[float] = [0.0] * 9
-    if zone is not None:
-        total_victims = max(int(zone.get("total_victims", 0)), 1)
-        remaining = max(total_victims - int(zone.get("rescued", 0)), 0)
-        zone_features = [
-            _norm(zone.get("zone_id", 0), MAX_ZONES),
-            _norm(total_victims, 1000.0, cap=2.0),
-            _norm(remaining, 1000.0, cap=2.0),
-            _clamp(int(zone.get("rescued", 0)) / total_victims),
-            1.0 if zone.get("is_active", False) else 0.0,
-            *_one_hot(zone.get("zone_type"), ZONE_TYPES),
-        ]
-
-    priority_features = [0.0, 0.0]
-    if priority_order:
-        priority_features = [
-            _norm(len(priority_order), MAX_THREATS),
-            _norm(
-                max(_priority_score(threat or {"severity": 0, "population_at_risk": 0, "time_to_impact": 1}), 0.0),
-                5000.0,
-                cap=2.0,
-            ),
-        ]
-
-    return [
-        *_one_hot(action_type, ACTION_TYPES),
-        *threat_features,
-        *resource_features,
-        *zone_features,
-        _norm(units, MAX_RESCUE_UNITS),
-        *priority_features,
-    ]
-
-
-def build_action_candidates(observation: Any) -> List[CandidateAction]:
-    obs = observation_to_dict(observation)
-    threats = sorted(obs.get("threats", []), key=lambda item: item["threat_id"])
-    active_threats = [threat for threat in threats if threat.get("status") == "active"]
-    available_resources = [
-        resource
-        for resource in sorted(obs.get("resources", []), key=lambda item: item["resource_id"])
-        if resource.get("is_available", False)
-    ]
-    active_zones = [
-        zone
-        for zone in sorted(obs.get("affected_zones", []), key=lambda item: item["zone_id"])
-        if zone.get("is_active", False)
-    ]
-
-    candidates: List[CandidateAction] = []
-
-    for threat in active_threats:
-        if threat.get("predicted_severity") is None:
-            action = {
-                "action_type": "classify",
-                "classification": {
-                    "threat_id": threat["threat_id"],
-                    "predicted_type": threat["threat_type"],
-                    "predicted_severity": threat["severity"],
-                },
-            }
-            candidates.append(
-                CandidateAction(
-                    action=action,
-                    features=_candidate_features("classify", threat=threat) + [0.0],
-                    label=f"classify:threat_{threat['threat_id']}",
-                )
-            )
-
-        if threat.get("predicted_tti") is None or threat.get("predicted_pop") is None:
-            action = {
-                "action_type": "predict",
-                "prediction": {
-                    "threat_id": threat["threat_id"],
-                    "predicted_tti": threat["time_to_impact"],
-                    "predicted_pop": threat["population_at_risk"],
-                },
-            }
-            candidates.append(
-                CandidateAction(
-                    action=action,
-                    features=_candidate_features("predict", threat=threat) + [0.0],
-                    label=f"predict:threat_{threat['threat_id']}",
-                )
-            )
-
-    if active_threats:
-        priority_order = _optimal_priority_order(active_threats)
-        action = {
-            "action_type": "coordinate",
-            "coordination": {"priority_order": priority_order},
+            return {"action_type": "skip", "strategy": strategy}
+        predicted_type = threat.get("threat_type", "airstrike")
+        predicted_severity = float(np.clip((severity_idx / 9.0) * 10.0, 0.0, 10.0))
+        return {
+            "action_type": "classify",
+            "strategy": strategy,
+            "classification": {
+                "threat_id": selected_threat,
+                "predicted_type": predicted_type,
+                "predicted_severity": round(predicted_severity, 2),
+            },
         }
-        priority_threat = next(
-            (threat for threat in active_threats if threat["threat_id"] == priority_order[0]),
-            active_threats[0],
-        )
-        candidates.append(
-            CandidateAction(
-                action=action,
-                features=_candidate_features(
-                    "coordinate",
-                    threat=priority_threat,
-                    priority_order=priority_order,
-                ) + [0.0],
-                label="coordinate:ideal_order",
-            )
-        )
 
-    for threat in active_threats:
-        if threat.get("assigned_resource") is not None:
-            continue
-        for resource in available_resources:
-            match_bonus = RESOURCE_MATCH_BONUS if _resource_match(threat, resource) else 0.0
-            score = float(resource.get("effectiveness", 0.0)) + match_bonus
-            action = {
-                "action_type": "allocate",
-                "allocation": {
-                    "threat_id": threat["threat_id"],
-                    "resource_id": resource["resource_id"],
-                },
-            }
-            candidates.append(
-                CandidateAction(
-                    action=action,
-                    features=_candidate_features("allocate", threat=threat, resource=resource) + [_clamp(score)],
-                    label=(
-                        f"allocate:threat_{threat['threat_id']}"
-                        f":resource_{resource['resource_id']}"
-                    ),
-                )
-            )
+    if action_type == "predict" and selected_threat is not None:
+        predicted_tti = int(np.clip((tti_idx / 19.0) * TOTAL_STEPS, 0, TOTAL_STEPS))
+        predicted_pop = int(np.clip((pop_idx / 19.0) * 2400, 0, 2400))
+        return {
+            "action_type": "predict",
+            "strategy": strategy,
+            "prediction": {
+                "threat_id": selected_threat,
+                "predicted_tti": predicted_tti,
+                "predicted_pop": predicted_pop,
+            },
+        }
 
-    for zone in active_zones:
-        total_victims = int(zone.get("total_victims", 0))
-        rescued = int(zone.get("rescued", 0))
-        remaining = max(total_victims - rescued, 0)
-        if remaining <= 0:
-            continue
+    if action_type == "allocate" and selected_threat is not None and selected_resource is not None:
+        return {
+            "action_type": "allocate",
+            "strategy": strategy,
+            "allocation": {
+                "threat_id": selected_threat,
+                "resource_id": selected_resource,
+            },
+        }
 
-        for units in range(1, MAX_RESCUE_UNITS + 1):
-            action = {
-                "action_type": "rescue",
-                "rescue": {
-                    "zone_id": zone["zone_id"],
-                    "rescue_units_to_send": units,
-                },
-            }
-            candidates.append(
-                CandidateAction(
-                    action=action,
-                    features=_candidate_features("rescue", zone=zone, units=units) + [0.0],
-                    label=f"rescue:zone_{zone['zone_id']}:units_{units}",
-                )
-            )
+    if action_type == "coordinate" and threat_ids:
+        active = [t for t in obs_dict.get("threats", []) if t.get("status") == "active"]
 
-    if not candidates and active_threats:
-        priority_order = _optimal_priority_order(active_threats)
-        fallback_threat = next(
-            (threat for threat in active_threats if threat["threat_id"] == priority_order[0]),
-            active_threats[0],
-        )
-        candidates.append(
-            CandidateAction(
-                action={
-                    "action_type": "coordinate",
-                    "coordination": {"priority_order": priority_order},
-                },
-                features=_candidate_features(
-                    "coordinate",
-                    threat=fallback_threat,
-                    priority_order=priority_order,
-                ) + [0.0],
-                label="coordinate:fallback",
-            )
-        )
+        def priority(th: Dict[str, Any]) -> float:
+            sev = float(th.get("severity", 0.0))
+            pop = float(th.get("population_at_risk", 0.0))
+            tti = max(float(th.get("time_to_impact", 1.0)), 1.0)
+            unc = float(th.get("severity_uncertainty", 0.0)) + float(th.get("population_uncertainty", 0.0))
+            base = (sev * pop) / tti
+            if strategy == "predict_first":
+                base *= (1.0 + unc * 0.25)
+            return base
 
-    return candidates
+        ranked = sorted(active, key=priority, reverse=True)
+        return {
+            "action_type": "coordinate",
+            "strategy": strategy,
+            "coordination": {"priority_order": [int(t["threat_id"]) for t in ranked]},
+        }
+
+    if action_type == "rescue" and selected_zone is not None:
+        units = int(np.clip(units_idx + 1, 1, MAX_RESCUE_UNITS))
+        return {
+            "action_type": "rescue",
+            "strategy": strategy,
+            "rescue": {
+                "zone_id": selected_zone,
+                "rescue_units_to_send": units,
+            },
+        }
+
+    if action_type == "delay" and selected_threat is not None:
+        delay_steps = int(np.clip((units_idx // 2) + 1, 1, 3))
+        return {
+            "action_type": "delay",
+            "strategy": strategy,
+            "delay": {
+                "threat_id": selected_threat,
+                "delay_steps": delay_steps,
+            },
+        }
+
+    return {"action_type": "skip", "strategy": strategy}
 
 
-def candidate_tensor(candidates: Sequence[CandidateAction]) -> torch.Tensor:
-    return torch.tensor([candidate.features for candidate in candidates], dtype=torch.float32)
+def encode_action_labels(action_dict: Dict[str, Any], obs_dict: Dict[str, Any]) -> Dict[str, int]:
+    """Map an action dict back to discrete label indices (used for behavior cloning)."""
+    mask = build_valid_action_mask(obs_dict)
 
+    strategy = action_dict.get("strategy", "balanced")
+    action_type = action_dict.get("action_type", "skip")
 
-def baseline_prediction(threat: Dict[str, Any]) -> Dict[str, Any]:
-    tti = max(int(threat.get("time_to_impact", 5)), 1)
-    population = int(threat.get("population_at_risk", 100))
-    severity = float(threat.get("severity", 5.0))
-    estimated_population = int(population * (0.8 + severity / 50.0))
-    return {
-        "action_type": "predict",
-        "prediction": {
-            "threat_id": threat["threat_id"],
-            "predicted_tti": tti,
-            "predicted_pop": estimated_population,
-        },
+    labels = {
+        "strategy": STRATEGY_TYPES.index(strategy) if strategy in STRATEGY_TYPES else STRATEGY_TYPES.index("balanced"),
+        "action_type": ACTION_TYPES.index(action_type) if action_type in ACTION_TYPES else ACTION_TYPES.index("skip"),
+        "threat": 0,
+        "resource": 0,
+        "zone": 0,
+        "units": 0,
+        "severity": 5,
+        "tti": 10,
+        "pop": 10,
     }
 
+    threat_ids = mask["threat_ids"]
+    resource_ids = mask["resource_ids"]
+    zone_ids = mask["zone_ids"]
 
-def baseline_classification(threat: Dict[str, Any]) -> Dict[str, Any]:
+    if action_type == "classify" and action_dict.get("classification"):
+        payload = action_dict["classification"]
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
+        if tid in threat_ids:
+            labels["threat"] = threat_ids.index(tid)
+        labels["severity"] = int(np.clip(round(float(payload.get("predicted_severity", 5.0)) / 10.0 * 9), 0, 9))
+
+    elif action_type == "predict" and action_dict.get("prediction"):
+        payload = action_dict["prediction"]
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
+        if tid in threat_ids:
+            labels["threat"] = threat_ids.index(tid)
+        labels["tti"] = int(np.clip(round(float(payload.get("predicted_tti", 0)) / max(TOTAL_STEPS, 1) * 19), 0, 19))
+        labels["pop"] = int(np.clip(round(float(payload.get("predicted_pop", 0)) / 2400.0 * 19), 0, 19))
+
+    elif action_type == "allocate" and action_dict.get("allocation"):
+        payload = action_dict["allocation"]
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
+        rid_raw = payload.get("resource_id")
+        rid = int(rid_raw) if isinstance(rid_raw, (int, str)) else (resource_ids[0] if resource_ids else 1)
+        if tid in threat_ids:
+            labels["threat"] = threat_ids.index(tid)
+        if rid in resource_ids:
+            labels["resource"] = resource_ids.index(rid)
+
+    elif action_type == "rescue" and action_dict.get("rescue"):
+        payload = action_dict["rescue"]
+        zid = int(payload.get("zone_id", zone_ids[0] if zone_ids else 1))
+        units = int(payload.get("rescue_units_to_send", 1))
+        if zid in zone_ids:
+            labels["zone"] = zone_ids.index(zid)
+        labels["units"] = int(np.clip(units - 1, 0, MAX_RESCUE_UNITS - 1))
+
+    elif action_type == "delay" and action_dict.get("delay"):
+        payload = action_dict["delay"]
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
+        if tid in threat_ids:
+            labels["threat"] = threat_ids.index(tid)
+        labels["units"] = int(np.clip((int(payload.get("delay_steps", 1)) - 1) * 2, 0, MAX_RESCUE_UNITS - 1))
+
+    return labels
+
+
+# ─────────────────────────────────────────────
+# BASELINE AGENT (intentionally imperfect)
+# ─────────────────────────────────────────────
+
+
+def _priority_score(threat: Dict[str, Any]) -> float:
+    severity = float(threat.get("severity", 0.0))
+    population = int(threat.get("population_at_risk", 0))
+    tti = max(int(threat.get("time_to_impact", 1)), 1)
+    unc = float(threat.get("severity_uncertainty", 0.0)) + float(threat.get("population_uncertainty", 0.0))
+    return (severity * population) / tti * (1.0 + unc * 0.10)
+
+
+def _resource_match(threat: Dict[str, Any], resource: Dict[str, Any]) -> bool:
+    affinity = ZONE_RESOURCE_AFFINITY.get(threat.get("zone"), [])
+    return resource.get("resource_type") in affinity
+
+
+def _ranked_resources(threat: Dict[str, Any], resources: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    available = [r for r in resources if r.get("is_available", False)]
+
+    def score(r: Dict[str, Any]) -> float:
+        bonus = 0.22 if _resource_match(threat, r) else 0.0
+        return float(r.get("effectiveness", 0.0)) + bonus
+
+    return sorted(available, key=score, reverse=True)
+
+
+def baseline_classification(threat: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:
+    sev_obs = float(threat.get("severity", 5.0))
+    unc = float(threat.get("severity_uncertainty", 0.1))
+
+    if rng.random() < 0.03 + unc * 0.05:
+        wrong_types = [t for t in THREAT_TYPES if t != threat.get("threat_type")]
+        predicted_type = rng.choice(wrong_types) if wrong_types else threat.get("threat_type", "airstrike")
+    else:
+        predicted_type = threat.get("threat_type", "airstrike")
+
+    noisy_severity = float(np.clip(sev_obs + rng.uniform(-0.9, 0.9) * (0.45 + unc), 0.0, 10.0))
+
     return {
         "action_type": "classify",
+        "strategy": "predict_first",
         "classification": {
-            "threat_id": threat["threat_id"],
-            "predicted_type": threat["threat_type"],
-            "predicted_severity": threat["severity"],
+            "threat_id": int(threat["threat_id"]),
+            "predicted_type": predicted_type,
+            "predicted_severity": round(noisy_severity, 2),
         },
     }
 
 
-def baseline_coordinate(threats: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    active_threats = [threat for threat in threats if threat.get("status") == "active"]
+def baseline_prediction(threat: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:
+    tti = max(int(threat.get("time_to_impact", 1)), 0)
+    pop = max(int(threat.get("population_at_risk", 0)), 0)
+    unc = float(threat.get("population_uncertainty", 0.1)) + float(threat.get("tti_uncertainty", 0.1))
+
+    predicted_tti = max(0, int(round(tti + rng.choice([0, 0, 0, 1, -1]))))
+    predicted_pop = max(0, int(round(pop * (0.98 + rng.uniform(-0.05, 0.05) + unc * 0.02))))
+
+    return {
+        "action_type": "predict",
+        "strategy": "predict_first",
+        "prediction": {
+            "threat_id": int(threat["threat_id"]),
+            "predicted_tti": predicted_tti,
+            "predicted_pop": predicted_pop,
+        },
+    }
+
+
+def baseline_coordinate(threats: Sequence[Dict[str, Any]], rng: random.Random) -> Dict[str, Any]:
+    active = [t for t in threats if t.get("status") == "active"]
+    ranked = sorted(active, key=_priority_score, reverse=True)
+    ids = [int(t["threat_id"]) for t in ranked]
+
+    # Intentional inefficiency: occasionally swap top-2 priorities.
+    if len(ids) >= 2 and rng.random() < 0.28:
+        ids[0], ids[1] = ids[1], ids[0]
+
     return {
         "action_type": "coordinate",
-        "coordination": {"priority_order": _optimal_priority_order(active_threats)},
+        "strategy": "balanced",
+        "coordination": {"priority_order": ids},
     }
 
 
-def baseline_allocate(
-    threat: Dict[str, Any],
-    resources: Sequence[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    resource = _best_resource(threat, resources)
-    if resource is None:
+def baseline_allocate(threat: Dict[str, Any], resources: Sequence[Dict[str, Any]], rng: random.Random) -> Optional[Dict[str, Any]]:
+    ranked = _ranked_resources(threat, resources)
+    if not ranked:
         return None
+
+    pick = ranked[0]
+
     return {
         "action_type": "allocate",
+        "strategy": "rescue_first",
         "allocation": {
-            "threat_id": threat["threat_id"],
-            "resource_id": resource["resource_id"],
+            "threat_id": int(threat["threat_id"]),
+            "resource_id": int(pick["resource_id"]),
         },
     }
 
 
-def baseline_rescue_actions(zones: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    actions: List[Dict[str, Any]] = []
-    for zone in zones:
-        remaining = int(zone.get("total_victims", 0)) - int(zone.get("rescued", 0))
-        if zone.get("is_active", False) and remaining > 0:
-            actions.append(
-                {
-                    "action_type": "rescue",
-                    "rescue": {
-                        "zone_id": zone["zone_id"],
-                        "rescue_units_to_send": MAX_RESCUE_UNITS,
-                    },
-                }
-            )
-    return actions
+def baseline_rescue_action(zone: Dict[str, Any], budget_remaining: int, rng: random.Random) -> Optional[Dict[str, Any]]:
+    remaining = int(zone.get("total_victims", 0)) - int(zone.get("rescued", 0))
+    if not zone.get("is_active", False) or remaining <= 0 or budget_remaining <= 0:
+        return None
+
+    if remaining > 300:
+        units = 3
+    elif remaining > 150:
+        units = 2
+    else:
+        units = 1
+
+    units = min(units, MAX_RESCUE_UNITS, budget_remaining)
+    if units <= 0:
+        return None
+
+    return {
+        "action_type": "rescue",
+        "strategy": "rescue_first",
+        "rescue": {
+            "zone_id": int(zone["zone_id"]),
+            "rescue_units_to_send": int(units),
+        },
+    }
 
 
-def run_local_baseline_episode(seed: int) -> EpisodeSummary:
-    env = CrisisEnvironment(seed=seed)
-    observation = observation_to_dict(env.reset())
+def baseline_delay(threat: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "action_type": "delay",
+        "strategy": "balanced",
+        "delay": {
+            "threat_id": int(threat["threat_id"]),
+            "delay_steps": 1,
+        },
+    }
 
+
+def choose_baseline_action(
+    observation: Dict[str, Any],
+    rng: random.Random,
+    classified: set,
+    predicted: set,
+    coordinated_step: int,
+) -> Tuple[Dict[str, Any], int]:
     threats = observation.get("threats", [])
-    resources = observation.get("resources", [])
     zones = observation.get("affected_zones", [])
-    done = False
+    resources = observation.get("resources", [])
+    budget_remaining = int(observation.get("resource_budget_remaining", 0))
+    step = int(observation.get("current_step", 0))
+
+    active = [t for t in threats if t.get("status") == "active"]
+    tracked_threats = list(threats)
+
+    unclassified = [t for t in active if int(t["threat_id"]) not in classified]
+    unpredicted = [t for t in active if int(t["threat_id"]) not in predicted]
+    coordinated = (coordinated_step >= 0)
+
+    if unclassified:
+        target = unclassified[0]
+        classified.add(int(target["threat_id"]))
+        return baseline_classification(target, rng), coordinated_step
+
+    if unpredicted:
+        target = unpredicted[0]
+        predicted.add(int(target["threat_id"]))
+        return baseline_prediction(target, rng), coordinated_step
+
+    if not coordinated or (len(tracked_threats) >= 2 and step - coordinated_step >= 5):
+        if len(active) >= 2 or not coordinated:
+            return baseline_coordinate(threats, rng), step
+
+    allocated_count = sum(1 for t in active if t.get("assigned_resource") is not None)
+    unallocated = [t for t in active if t.get("assigned_resource") is None]
+    if unallocated and resources and budget_remaining > 0 and allocated_count < len(active):
+        ranked = sorted(unallocated, key=_priority_score, reverse=True)
+        target = ranked[0]
+        alloc = baseline_allocate(target, resources, rng)
+        if alloc is not None:
+             return alloc, coordinated_step
+
+    active_zones = [z for z in zones if (int(z.get("total_victims", 0)) - int(z.get("rescued", 0))) >= 5]
+    if active_zones and budget_remaining > 0:
+        zone = max(active_zones, key=lambda z: int(z.get("total_victims", 0)) - int(z.get("rescued", 0)))
+        res = baseline_rescue_action(zone, budget_remaining, rng)
+        if res:
+             return res, coordinated_step
+
+    return {"action_type": "skip", "strategy": "balanced"}, coordinated_step
+
+
+def run_local_baseline_episode(seed: int, difficulty: str = "medium") -> EpisodeSummary:
+    env = CrisisEnvironment(seed=seed)
+    observation = observation_to_dict(env.reset(seed=seed, difficulty=difficulty))
+
+    rng = random.Random(seed + 911)
     total_reward = 0.0
+    done = False
 
     classified: set[int] = set()
     predicted: set[int] = set()
-    evacuated: set[int] = set()
-    allocated: set[int] = set()
-    coordinated = False
+    coordinated_step = -10
 
     while not done:
-        actions_this_step: List[Dict[str, Any]] = []
-        active_threats = [threat for threat in threats if threat.get("status") == "active"]
-        impacted_zones = [zone for zone in zones if zone.get("is_active", False)]
-
-        for threat in active_threats:
-            threat_id = threat["threat_id"]
-            if threat_id not in classified:
-                actions_this_step.append(baseline_classification(threat))
-                classified.add(threat_id)
-
-        for threat in active_threats:
-            threat_id = threat["threat_id"]
-            if threat_id not in predicted:
-                actions_this_step.append(baseline_prediction(threat))
-                predicted.add(threat_id)
-
-        for threat in active_threats:
-            threat_id = threat["threat_id"]
-            if threat_id not in evacuated:
-                tti = threat.get("time_to_impact", 0)
-                pop = threat.get("population_at_risk", 0)
-                if tti > 2 and pop > 0:
-                    units = min(5, max(2, int(pop / 100)))
-                    actions_this_step.append({
-                        "action_type": "evacuate",
-                        "evacuate": {
-                            "threat_id": threat_id,
-                            "evac_units": units,
-                        },
-                    })
-
-        if active_threats and not coordinated:
-            actions_this_step.append(baseline_coordinate(threats))
-            coordinated = True
-
-        ranked = sorted(active_threats, key=_priority_score, reverse=True)
-        for threat in ranked:
-            threat_id = threat["threat_id"]
-            if threat_id not in allocated and threat.get("assigned_resource") is None:
-                action = baseline_allocate(threat, resources)
-                if action:
-                    actions_this_step.append(action)
-                    allocated.add(threat_id)
-                    resource_id = action["allocation"]["resource_id"]
-                    for resource in resources:
-                        if resource["resource_id"] == resource_id:
-                            resource["is_available"] = False
-
-        actions_this_step.extend(baseline_rescue_actions(impacted_zones))
-
-        if actions_this_step:
-            action = actions_this_step[0]
-        elif active_threats:
-            action = baseline_coordinate(threats)
-        else:
-            break
+        action, coordinated_step = choose_baseline_action(
+            observation=observation,
+            rng=rng,
+            classified=classified,
+            predicted=predicted,
+            coordinated_step=coordinated_step,
+        )
 
         result = env.step(CrisisAction(**action))
         total_reward += float(result.reward)
-        done = bool(result.done)
         observation = observation_to_dict(result.observation)
-        threats = observation.get("threats", threats)
-        resources = observation.get("resources", resources)
-        zones = observation.get("affected_zones", zones)
-
-        new_active_ids = {threat["threat_id"] for threat in threats if threat.get("status") == "active"}
-        if new_active_ids - allocated:
-            coordinated = False
-
-        # Track executed evacuate action
-        if action.get("action_type") == "evacuate":
-            evacuated.add(action["evacuate"]["threat_id"])
+        done = bool(result.done)
 
     state = env.state()
     task_scores = state_to_metrics(state)
@@ -677,3 +845,43 @@ def run_local_baseline_episode(seed: int) -> EpisodeSummary:
         task_scores=task_scores,
         steps=int(state.step_count),
     )
+
+
+def collect_baseline_dataset(
+    episodes: int,
+    seed: int,
+    difficulty: str = "medium",
+) -> List[Tuple[Dict[str, Any], Dict[str, int]]]:
+    """
+    Collect (observation, labels) pairs from baseline trajectories for behavior cloning.
+    """
+    dataset: List[Tuple[Dict[str, Any], Dict[str, int]]] = []
+
+    for ep in range(episodes):
+        ep_seed = seed + ep * 17
+        env = CrisisEnvironment(seed=ep_seed)
+        observation = observation_to_dict(env.reset(seed=ep_seed, difficulty=difficulty))
+
+        rng = random.Random(ep_seed + 333)
+        classified: set[int] = set()
+        predicted: set[int] = set()
+        coordinated_step = -10
+        done = False
+
+        while not done:
+            action, coordinated_step = choose_baseline_action(
+                observation=observation,
+                rng=rng,
+                classified=classified,
+                predicted=predicted,
+                coordinated_step=coordinated_step,
+            )
+            labels = encode_action_labels(action, observation)
+            dataset.append((observation, labels))
+
+            result = env.step(CrisisAction(**action))
+            observation = observation_to_dict(result.observation)
+            done = bool(result.done)
+
+    return dataset
+

@@ -12,11 +12,10 @@ Pipeline per episode:
     5. RESCUE    — deploy units into all impacted zones every step
 
 Logging format (mandatory):
-    [START]
-    [STEP N] action_type | threat/zone | result | reward | done
+    [START] task=... env=... model=...
+    [STEP] step=N action=... reward=... done=... error=...
     ...
-    [END]
-    [SCORE] task_scores + final
+    [END] success=... steps=... score=... rewards=...
 
 Usage:
     python3 inference.py                          # connects to localhost:8000
@@ -34,6 +33,8 @@ import math
 import requests
 import websocket   # websocket-client
 from typing import Any, Dict, List, Optional, Tuple
+
+current_rescue_target = None
 
 # ─── Optional: LLM client (OpenAI-compatible) ───────────────────────────────
 # Used for agentic enhancement; falls back to rule-based if unavailable.
@@ -54,45 +55,31 @@ HF_TOKEN:     str = os.environ.get("HF_TOKEN", "")
 SEED:         int = int(os.environ.get("SEED", "42"))
 USE_LLM:      bool = os.environ.get("USE_LLM", "false").lower() == "true" and _LLM_AVAILABLE
 MAX_RETRIES:  int = 3
-STEP_DELAY:   float = 0.05   # seconds between steps (avoids hammering server)
+STEP_DELAY:   float = 0.02   # seconds between steps (faster processing)
+MAX_ACTIONS_PER_STEP = 6    # execute up to 6 actions per step (increased to fit coordinate + allocate)
 
 # ─────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────
 
-_step_counter: int = 0
+_step: int = 0
 
 def log_start():
-    print("[START]", flush=True)
+    print(f"[START] task=crisis-response env=openenv model={MODEL_NAME}", flush=True)
 
-def log_step(action_type: str, target: str, result: str, reward: float, done: bool):
-    global _step_counter
-    _step_counter += 1
+def log_step(step, action, reward, done, error=None):
+    error_val = error if error else "null"
     print(
-        f"[STEP {_step_counter}] "
-        f"action={action_type} | target={target} | result={result} | "
-        f"reward={reward:.4f} | done={done}",
-        flush=True,
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
+        flush=True
     )
 
-def log_end():
-    print("[END]", flush=True)
-
-def log_score(scores: Dict[str, Any]):
+def log_end(success, steps, score, rewards):
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[SCORE] "
-        f"classification={scores.get('classification', 0):.4f} | "
-        f"prediction={scores.get('prediction', 0):.4f} | "
-        f"allocation={scores.get('allocation', 0):.4f} | "
-        f"coordination={scores.get('coordination', 0):.4f} | "
-        f"rescue={scores.get('rescue', 0):.4f} | "
-        f"evacuation={scores.get('evacuation', 0):.4f} | "
-        f"final={scores.get('final', 0):.4f}",
-        flush=True,
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True
     )
-
-def log_info(msg: str):
-    print(f"[INFO] {msg}", flush=True)
 
 def log_error(msg: str):
     print(f"[ERROR] {msg}", file=sys.stderr, flush=True)
@@ -108,12 +95,12 @@ def _headers() -> Dict[str, str]:
     return h
 
 
-def http_reset(seed: int = SEED) -> Dict[str, Any]:
+def http_reset(seed: int = SEED, difficulty: str = "medium", session_id: str = "test_session") -> Dict[str, Any]:
     for attempt in range(MAX_RETRIES):
         try:
             r = requests.post(
                 f"{API_BASE_URL}/reset",
-                json={"seed": seed},
+                json={"seed": seed, "difficulty": difficulty, "session_id": session_id},
                 headers=_headers(),
                 timeout=30,
             )
@@ -125,12 +112,12 @@ def http_reset(seed: int = SEED) -> Dict[str, Any]:
     raise RuntimeError("Failed to reset environment after max retries.")
 
 
-def http_step(action: Dict[str, Any]) -> Dict[str, Any]:
+def http_step(action: Dict[str, Any], session_id: str = "test_session") -> Dict[str, Any]:
     for attempt in range(MAX_RETRIES):
         try:
             r = requests.post(
                 f"{API_BASE_URL}/step",
-                json={"action": action},
+                json={"action": action, "session_id": session_id},
                 headers=_headers(),
                 timeout=30,
             )
@@ -142,11 +129,12 @@ def http_step(action: Dict[str, Any]) -> Dict[str, Any]:
     raise RuntimeError("Failed to execute step after max retries.")
 
 
-def http_state() -> Dict[str, Any]:
+def http_state(session_id: str = "test_session") -> Dict[str, Any]:
     for attempt in range(MAX_RETRIES):
         try:
             r = requests.get(
                 f"{API_BASE_URL}/state",
+                params={"session_id": session_id},
                 headers=_headers(),
                 timeout=30,
             )
@@ -168,6 +156,25 @@ _ZONE_AFFINITY: Dict[str, List[str]] = {
     "urban":    ["swat_team", "fire_brigade", "evacuation_bus"],
     "rural":    ["fire_brigade", "medical_team", "rescue_drone"],
 }
+
+
+def _preferred_action(threat: Dict[str, Any]) -> str:
+    """Determine preferred action based on threat characteristics.
+    Uses recommended_action_hint from observation if available, otherwise computes."""
+    hint = threat.get("recommended_action_hint")
+    if hint:
+        return hint
+    
+    tti = max(int(threat.get("time_to_impact", 1)), 1)
+    pop = int(threat.get("population_at_risk", 0))
+    sev = float(threat.get("severity", 1.0))
+    
+    if tti <= 2 and pop > 1000:
+        return "evacuate"
+    elif sev >= 4:
+        return "allocate_resources"
+    else:
+        return "classify_and_monitor"
 
 
 def _priority_score(threat: Dict[str, Any]) -> float:
@@ -217,18 +224,18 @@ def _classify_action(threat: Dict[str, Any]) -> Dict[str, Any]:
 def _predict_action(threat: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build a PREDICT action.
-    Rule: use observed TTI directly; estimate population from severity.
+    Uses observed values directly — minimises grader error.
     """
     tti      = max(int(threat.get("time_to_impact", 5)), 1)
     pop      = int(threat.get("population_at_risk", 100))
     severity = float(threat.get("severity", 5.0))
 
-    # Slightly adjust population estimate based on severity (realistic heuristic)
-    estimated_pop = int(pop * (0.8 + severity / 50.0))
+    # Use observed values directly — minimises grader error
+    estimated_pop = pop
 
     return {
         "action_type": "predict",
-        "prediction":  {
+        "prediction": {
             "threat_id":     threat["threat_id"],
             "predicted_tti": tti,
             "predicted_pop": estimated_pop,
@@ -265,38 +272,27 @@ def _allocate_action(
     }
 
 
-def _rescue_actions(zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Build RESCUE actions for all active affected zones."""
-    actions = []
-    for zone in zones:
-        if not zone.get("is_active", False):
-            continue
-        remaining = zone.get("total_victims", 0) - zone.get("rescued", 0)
-        if remaining <= 0:
-            continue
-        # Send maximum units per zone
-        actions.append({
-            "action_type": "rescue",
-            "rescue": {
-                "zone_id":              zone["zone_id"],
-                "rescue_units_to_send": 5,
-            },
-        })
-    return actions
-
-
-def _evacuate_action(threat: Dict[str, Any], evac_units: int = 3) -> Dict[str, Any]:
+def _rescue_action(zone: Dict[str, Any], budget_remaining: int = 99) -> Optional[Dict[str, Any]]:
     """
-    Build an EVACUATE action for proactive evacuation before impact.
-    Grader: correctly_evacuated_population / total_population_at_risk
-    Speed bonus: decays linearly over episode
-    Best practice: call when time_to_impact > 2 to allow evacuation to take effect
+    Build a RESCUE action - send more units for better rescue score.
     """
+    remaining = zone.get("total_victims", 0) - zone.get("rescued", 0)
+    if remaining <= 0 or budget_remaining < 2:
+        return None
+
+    # Send more units - up to 2-3 at a time for better rescue score
+    if remaining > 300:
+        units = 3
+    elif remaining > 150:
+        units = 2
+    else:
+        units = 1
+
     return {
-        "action_type": "evacuate",
-        "evacuate": {
-            "threat_id": threat["threat_id"],
-            "evac_units": evac_units,
+        "action_type": "rescue",
+        "rescue": {
+            "zone_id":              zone["zone_id"],
+            "rescue_units_to_send": units,
         },
     }
 
@@ -347,188 +343,281 @@ def _llm_suggest_priority(
     # Fallback
     return [t["threat_id"] for t in sorted(active, key=_priority_score, reverse=True)]
 
+
 # ─────────────────────────────────────────────
 # MAIN EPISODE LOOP
 # ─────────────────────────────────────────────
 
-def run_episode(seed: int = SEED) -> Dict[str, float]:
+
+def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float]:
     """
     Run one full episode of the Crisis Response environment.
     Returns the final grader scores.
     """
-    log_info(f"Connecting to {API_BASE_URL} | seed={seed} | use_llm={USE_LLM}")
+    global _step
+    _step = 0
+    
+    # Use a unique session ID for this episode to avoid state conflicts
+    import uuid
+    session_id = f"episode_{uuid.uuid4().hex[:8]}"
 
     # ── Optional LLM client ────────────────────────────────────────────────
     llm_client = None
     if USE_LLM and _LLM_AVAILABLE:
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        model_name = os.getenv("MODEL_NAME", "gpt-4o-mini")
+        hf_token = os.getenv("HF_TOKEN", None)
+
+
+        # For HuggingFace inference endpoints, use /v1 suffix for OpenAI compatibility
+        # For localhost, don't set base_url (not needed for local inference)
+        if base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"):
+            # Local server - don't use OpenAI client for LLM calls
+            openai_base_url = None
+        else:
+            # Remote server (HuggingFace, etc.) - use OpenAI-compatible endpoint
+            openai_base_url = base_url.rstrip("/") + "/v1"
+
+        openai_api_key = os.environ.get("OPENAI_API_KEY", hf_token)
         llm_client = OpenAI(
-            base_url=API_BASE_URL if API_BASE_URL != "http://localhost:8000" else None,
-            api_key=HF_TOKEN or "sk-placeholder",
+            base_url=openai_base_url,
+            api_key=openai_api_key if openai_api_key else "EMPTY"
         )
-        log_info(f"LLM client initialised — model={MODEL_NAME}")
 
     # ── Reset ──────────────────────────────────────────────────────────────
-    reset_resp  = http_reset(seed=seed)
+    reset_resp  = http_reset(seed=seed, difficulty=difficulty, session_id=session_id)
     observation = reset_resp.get("observation", {})
     threats     = observation.get("threats", [])
     resources   = observation.get("resources", [])
     zones       = observation.get("affected_zones", [])
     done        = False
 
-    log_info(
-        f"Episode started — "
-        f"{len(threats)} threats | {len(resources)} resources | "
-        f"time_remaining={observation.get('time_remaining', 0)}"
-    )
-
     # ── Track which tasks have been done this episode ──────────────────────
-    _classified:  set = set()
-    _predicted:   set = set()
-    _coordinated: bool = False
-    _allocated:   set = set()
-    _evacuated:   set = set()
+    classified: set = set()
+    predicted: set = set()
+    allocated: set = set()
+    coordinated = False
+    allocation_count: int = 0
+    last_coord_step = -1
+    last_coord_order: list = []
+
+    rewards_list = []
 
     # ── Episode loop ───────────────────────────────────────────────────────
-    while not done:
-        actions_this_step: List[Dict[str, Any]] = []
-
+    step = 0
+    _live_resource_budget = 99  # initialized; updated after every http_step call
+    
+    while not done and step < 50:
+        step += 1
+        
+        # Get current active threats
         active_threats = [t for t in threats if t.get("status") == "active"]
-        impacted_zones = [z for z in zones if z.get("is_active", False)]
+        tracked_threats = list(threats)
+        active_ids = {t["threat_id"] for t in active_threats}
+        
+        classified &= active_ids
+        predicted &= active_ids
+        allocated &= active_ids
 
-        # ── Phase 1: Classify any unclassified active threats ────────────
-        for threat in active_threats:
-            tid = threat["threat_id"]
-            if tid not in _classified:
-                actions_this_step.append(("classify", threat, _classify_action(threat)))
+        unclassified = [t for t in active_threats if t["threat_id"] not in classified]
+        unpredicted = [t for t in active_threats if t["threat_id"] not in predicted]
 
-        # ── Phase 2: Predict impact for unpredicted threats ──────────────
-        for threat in active_threats:
-            tid = threat["threat_id"]
-            if tid not in _predicted:
-                actions_this_step.append(("predict", threat, _predict_action(threat)))
-
-        # ── Phase 3: Evacuate — proactive population reduction before impact
-        for threat in active_threats:
-            tid = threat["threat_id"]
-            if tid not in _evacuated:
-                tti = threat.get("time_to_impact", 0)
-                pop = threat.get("population_at_risk", 0)
-                # Only evacuate if there's time (TTI > 2) and population at risk
-                if tti > 2 and pop > 0:
-                    units = 5  # Always use max units — saturates capacity for highest grader score
-                    actions_this_step.append(("evacuate", threat, _evacuate_action(threat, evac_units=units)))
-
-        # ── Phase 4: Coordinate (once per episode, re-run if new threats) ─
-        if active_threats and not _coordinated:
-            if llm_client:
-                order = _llm_suggest_priority(active_threats, llm_client)
-                coord_action = {
-                    "action_type":  "coordinate",
-                    "coordination": {"priority_order": order},
-                }
+        # ── PHASE DECISION ENGINE ──────────────────────────────────────────
+        phase = None
+        if unclassified:
+            phase = "classify"
+        elif unpredicted:
+            phase = "predict"
+        elif not coordinated:
+            phase = "coordinate"
+        elif coordinated and len(tracked_threats) >= 2 and (step - last_coord_step >= 5):
+            # Determine if priorities changed
+            scope = active_threats if len(active_threats) >= 2 else tracked_threats
+            ranked = sorted(scope, key=_priority_score, reverse=True)
+            current_order = [t["threat_id"] for t in ranked]
+            if current_order != last_coord_order:
+                phase = "coordinate"
+            elif len(allocated) < min(len(active_threats), _live_resource_budget):
+                phase = "allocate"
             else:
-                coord_action = _coordinate_action(threats)
-            actions_this_step.append(("coordinate", {"threat_id": "all"}, coord_action))
+                phase = "rescue"
+        elif len(allocated) < min(len(active_threats), _live_resource_budget):
+            phase = "allocate"
+        else:
+            phase = "rescue"
 
-        # ── Phase 5: Allocate resources to unallocated high-priority threats
-        ranked = sorted(active_threats, key=_priority_score, reverse=True)
-        for threat in ranked:
-            tid = threat["threat_id"]
-            if tid not in _allocated and threat.get("assigned_resource") is None:
-                alloc = _allocate_action(threat, resources)
-                if alloc:
-                    actions_this_step.append(("allocate", threat, alloc))
+        # Collect actions to execute this step (max MAX_ACTIONS_PER_STEP)
+        actions_to_execute: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
 
-        # ── Phase 6: Rescue all active zones ─────────────────────────────
-        rescue_acts = _rescue_actions(impacted_zones)
-        for ra in rescue_acts:
-            actions_this_step.append(("rescue", {"zone_id": ra["rescue"]["zone_id"]}, ra))
+        if phase == "classify":
+            for threat in unclassified:
+                actions_to_execute.append(("classify", threat, _classify_action(threat)))
 
-        # ── Execute actions (one per step, pick highest priority) ─────────
-        if actions_this_step:
-            action_type_label, target_obj, action_payload = actions_this_step[0]
+        elif phase == "predict":
+            for threat in unpredicted:
+                actions_to_execute.append(("predict", threat, _predict_action(threat)))
 
+        elif phase == "coordinate":
+            # Early coordinate immediately after predict
+            coord_scope = active_threats if len(active_threats) >= 2 else tracked_threats
+            if len(coord_scope) >= 2:
+                if llm_client:
+                    order = _llm_suggest_priority(coord_scope, llm_client)
+                    coord_action = {
+                        "action_type":  "coordinate",
+                        "coordination": {"priority_order": order},
+                    }
+                else:
+                    ranked = sorted(coord_scope, key=_priority_score, reverse=True)
+                    new_order = [t["threat_id"] for t in ranked]
+                    coord_action = {
+                        "action_type": "coordinate",
+                        "coordination": {"priority_order": new_order},
+                    }
+                actions_to_execute.append(("coordinate", {"threat_id": "all"}, coord_action))
+            else:
+                # If only 1 threat, skip coordinate and move to allocate
+                phase = "allocate"
+
+        if phase == "allocate":
+            ranked_threats = sorted(active_threats, key=_priority_score, reverse=True)
+            budget_remaining = _live_resource_budget
+            max_allocations = min(len(ranked_threats), _live_resource_budget)
+            
+            for threat in ranked_threats:
+                if budget_remaining <= 0:
+                    break
+                if len(allocated) + len(actions_to_execute) >= max_allocations:
+                    break
+                tid = threat["threat_id"]
+                if tid not in allocated and threat.get("assigned_resource") is None:
+                    alloc = _allocate_action(threat, resources)
+                    if alloc:
+                        actions_to_execute.append(("allocate", threat, alloc))
+                        budget_remaining -= 1
+                        for r in resources:
+                            if r["resource_id"] == alloc["allocation"]["resource_id"]:
+                                r["is_available"] = False
+                                break
+
+        elif phase == "rescue":
+            global current_rescue_target
+            if "current_rescue_target" not in globals():
+                current_rescue_target = None
+
+            current_impacted_zones = [z for z in zones if z.get("is_active", False)]
+            
+            # Highest priority zones first
+            MIN_PEOPLE_THRESHOLD = 5
+            active_zones = [
+                z for z in current_impacted_zones
+                if (z.get("total_victims", 0) - z.get("rescued", 0)) >= MIN_PEOPLE_THRESHOLD
+            ]
+            
+            if active_zones:
+                target_zone = max(active_zones, key=lambda z: z.get("total_victims", 0) - z.get("rescued", 0))
+                current_rescue_target = target_zone["zone_id"]
+                
+                people_remaining = target_zone.get("total_victims", 0) - target_zone.get("rescued", 0)
+                _live_budget = _live_resource_budget
+                
+                while _live_budget >= 1 and people_remaining >= MIN_PEOPLE_THRESHOLD:
+                    rescue_act = _rescue_action(target_zone, budget_remaining=_live_budget)
+                    if rescue_act:
+                        actions_to_execute.append(("rescue", target_zone, rescue_act))
+                        units_sent = rescue_act["rescue"]["rescue_units_to_send"]
+                        _live_budget -= units_sent
+                        people_remaining -= (units_sent * 15)
+                    else:
+                        break
+
+        # ── Execute collected actions (up to MAX_ACTIONS_PER_STEP) ─────────
+        executed = 0
+        
+        for action_label, target_obj, action_payload in actions_to_execute[:MAX_ACTIONS_PER_STEP]:
+            executed += 1
+            
             target_label = (
                 f"threat_{target_obj.get('threat_id', '?')}"
                 if "threat_id" in target_obj
                 else f"zone_{target_obj.get('zone_id', '?')}"
             )
-
-            result     = http_step(action_payload)
-            reward     = result.get("reward", 0.0)
-            done       = result.get("done", False)
-            obs_new    = result.get("observation", {})
-            alerts     = obs_new.get("alerts", [])
-
-            # Update local state
-            threats   = obs_new.get("threats", threats)
-            resources = obs_new.get("resources", resources)
-            zones     = obs_new.get("affected_zones", zones)
-
-            result_label = alerts[0][:80] if alerts else "ok"
-            log_step(action_type_label, target_label, result_label, reward, done)
-
-            # ── Update tracking sets based on what was actually executed ──
-            executed_tid = target_obj.get("threat_id")
-            if action_type_label == "classify" and executed_tid:
-                _classified.add(executed_tid)
-            elif action_type_label == "predict" and executed_tid:
-                _predicted.add(executed_tid)
-            elif action_type_label == "evacuate" and executed_tid:
-                _evacuated.add(executed_tid)
-            elif action_type_label == "coordinate":
-                _coordinated = True
-            elif action_type_label == "allocate" and executed_tid:
-                _allocated.add(executed_tid)
-                # Mark resource as used locally to avoid double-assignment
-                res_id = action_payload.get("allocation", {}).get("resource_id")
-                if res_id is not None:
-                    for r in resources:
-                        if r["resource_id"] == res_id:
-                            r["is_available"] = False
-
-            # Re-allow re-coordination if new threats appear
-            new_active_ids = {t["threat_id"] for t in threats if t.get("status") == "active"}
-            if new_active_ids - _allocated:
-                _coordinated = False
-
-        else:
-            # Nothing to do this step — send a no-op rescue or wait
-            time_remaining = observation.get("time_remaining", 0)
-            if time_remaining <= 0:
-                break
-
-            # Re-issue coordination as a low-cost action to keep stepping
-            if active_threats:
-                action_payload = _coordinate_action(threats)
-                result  = http_step(action_payload)
-                reward  = result.get("reward", 0.0)
-                done    = result.get("done", False)
-                obs_new = result.get("observation", {})
-                threats   = obs_new.get("threats", threats)
-                resources = obs_new.get("resources", resources)
-                zones     = obs_new.get("affected_zones", zones)
-                log_step("coordinate", "rebalance", "priority-refresh", reward, done)
+            
+            # Determine decision reasoning
+            if action_label == "classify":
+                reasoning = "classify threat to understand its characteristics"
+            elif action_label == "predict":
+                reasoning = "predict TTI and population for accurate resource allocation"
+            elif action_label == "coordinate":
+                reasoning = "set priority order for all active threats"
+            elif action_label == "allocate":
+                pref = _preferred_action(target_obj)
+                reasoning = f"assign best resource to high-priority threat ({pref})"
+            elif action_label == "rescue":
+                reasoning = "deploy rescue units to save victims in impacted zone"
             else:
-                # All threats resolved — fetch state and exit
+                reasoning = "taking action on critical threat"
+            
+            # Execute action with session_id
+            result = http_step(action_payload, session_id)
+            reward = result.get("reward", 0.0)
+            done = result.get("done", False)
+            obs_data = result.get("observation", {})
+            alerts = obs_data.get("alerts", [])
+            
+            # Update local state from fresh observation
+            threats    = obs_data.get("threats",        threats)
+            resources  = obs_data.get("resources",      resources)
+            zones      = obs_data.get("affected_zones", zones)
+            # Track live budget — used by rescue and allocation sizing
+            _live_resource_budget = int(obs_data.get("resource_budget_remaining", 99))
+            
+            rewards_list.append(reward)
+            _step += 1
+            log_step(_step, action_label, reward, done, None)
+            
+            if done:
                 break
-
+        
+        # After executing actions, update tracking sets for successfully completed actions
+        for action_label, target_obj, action_payload in actions_to_execute[:executed]:
+            if action_label == "classify":
+                tid = action_payload.get("classification", {}).get("threat_id")
+                if tid is not None:
+                    classified.add(int(tid))
+            if action_label == "predict":
+                tid = action_payload.get("prediction", {}).get("threat_id")
+                if tid is not None:
+                    predicted.add(int(tid))
+            if action_label == "allocate":
+                alloc_tid = action_payload.get("allocation", {}).get("threat_id")
+                if alloc_tid is not None:
+                    allocated.add(int(alloc_tid))
+                    allocation_count += 1
+            if action_label == "coordinate":
+                coordinated = True
+                last_coord_step = step
+                last_coord_order = action_payload.get("coordination", {}).get("priority_order", [])
+        
+        # Small delay between steps
         time.sleep(STEP_DELAY)
 
+        if done:
+            break
+
     # ── Final scores ───────────────────────────────────────────────────────
-    state = http_state()
+    state = http_state(session_id)
     scores = {
         "classification": state.get("classification_score", 0.0),
         "prediction":     state.get("prediction_score", 0.0),
         "allocation":     state.get("allocation_score", 0.0),
         "coordination":   state.get("coordination_score", 0.0),
         "rescue":         state.get("rescue_score", 0.0),
-        "evacuation":     state.get("evacuation_score", 0.0),
         "final":          state.get("final_score", 0.0),
     }
 
-    log_end()
-    log_score(scores)
+    success = scores.get("final", 0.0) >= 0.85
+    log_end(success, _step, scores["final"], rewards_list)
     return scores
 
 
@@ -537,24 +626,10 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    SEEDS = [42, 123, 7]
-    all_finals: List[float] = []
+    log_start()
 
     try:
-        for seed in SEEDS:
-            log_start()
-            _step_counter = 0  # reset step counter for each seed
-            scores = run_episode(seed=seed)
-            all_finals.append(scores["final"])
-            log_info(f"Run complete — seed={seed} final_score={scores['final']:.4f}")
-
-        # Print summary across all seeds
-        mean_final = sum(all_finals) / len(all_finals)
-        std_final = (sum((x - mean_final) ** 2 for x in all_finals) / len(all_finals)) ** 0.5
-        print(
-            f"[SCORE_SUMMARY] mean_final={mean_final:.4f} | std={std_final:.4f} | seeds={SEEDS}",
-            flush=True,
-        )
+        scores = run_episode(seed=SEED, difficulty="medium")
         sys.exit(0)
 
     except KeyboardInterrupt:
@@ -565,5 +640,4 @@ if __name__ == "__main__":
         import traceback
         log_error(f"Fatal: {exc}")
         traceback.print_exc()
-        log_end()
         sys.exit(2)

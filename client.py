@@ -65,7 +65,7 @@ class CrisisEnvClient:
         return self._post("/step", {"action": action, "session_id": session_id})
 
     def state(self, session_id: str = "default") -> Dict[str, Any]:
-        """Return the current episode state and all 6 grader scores."""
+        """Return the current episode state and all 5 grader scores."""
         return self._get("/state", params={"session_id": session_id})
 
     def scores(self, session_id: str = "default") -> Dict[str, Any]:
@@ -123,19 +123,6 @@ class CrisisEnvClient:
             "rescue": {
                 "zone_id":              zone_id,
                 "rescue_units_to_send": units,
-            },
-        })
-
-    def evacuate(self, threat_id: int, evac_units: int = 3) -> Dict:
-        """
-        Proactive evacuation — reduce population at risk before threat impacts.
-        Task 6 of 6. Must be called BEFORE a threat's time_to_impact reaches 0.
-        """
-        return self.step({
-            "action_type": "evacuate",
-            "evacuate": {
-                "threat_id": threat_id,
-                "evac_units": evac_units,
             },
         })
 
