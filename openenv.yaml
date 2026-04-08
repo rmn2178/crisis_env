@@ -1,154 +1,64 @@
 name: crisis_response_env
-version: "1.0"
-description: >
-  AI Crisis Response & Rescue Coordination Environment.
-  A real-world OpenEnv environment where an AI agent must simultaneously classify
-  threats, predict impact, allocate resources, coordinate multi-threat response,
-  and optimise rescue operations to maximise lives saved and minimise casualties.
-
-author: crisis-response-team
-tags:
-  - openenv
-  - crisis-management
-  - multi-agent
-  - rescue
-  - real-world
-  - reinforcement-learning
-
-environment:
-  entry_point: server.app:app
-  host: 0.0.0.0
-  port: 8000
-  protocol: http+websocket
-
-endpoints:
-  reset:   POST /reset
-  step:    POST /step
-  state:   GET  /state
-  health:  GET  /health
-  tasks:   GET  /tasks
-  scores:  GET  /scores
-  ws:      WS   /ws
+version: "1.0.0"
+description: "AI Crisis Response and Rescue Coordination Environment"
 
 observation_space:
-  type: structured
-  fields:
-    threats:
-      type: list[ThreatInfo]
-      description: All active, impacted, and resolved threats
-    resources:
-      type: list[ResourceInfo]
-      description: Available and assigned resource units
-    affected_zones:
-      type: list[AffectedZoneInfo]
-      description: Post-impact zones requiring rescue
-    time_remaining:
-      type: int
-      description: Steps remaining in the current episode
-    alerts:
-      type: list[str]
-      description: Human-readable event log for the last step
+  type: object
+  properties:
+    threat_id: {type: string}
+    threat_type: {type: string, enum: [AIRSTRIKE, SHIP_ATTACK, DRONE_THREAT]}
+    location: {type: string}
+    severity: {type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW]}
+    population_at_risk: {type: integer}
+    time_to_impact: {type: integer}
+    available_resources: {type: array, items: {type: string}}
+    threats_remaining: {type: integer}
+    last_action_result: {type: string}
+    cumulative_score: {type: number}
+    done: {type: boolean}
 
 action_space:
-  type: structured
-  actions:
-    - name: classify
-      description: Identify threat type and severity
-      payload: ClassificationPayload
-    - name: predict
-      description: Predict time-to-impact and population affected
-      payload: PredictionPayload
-    - name: allocate
-      description: Assign a resource unit to a threat
-      payload: AllocationPayload
-    - name: coordinate
-      description: Set global priority ordering across all active threats
-      payload: CoordinationPayload
-    - name: rescue
-      description: Deploy rescue units into an impacted zone
-      payload: RescuePayload
-    - name: evacuate
-      description: Proactive evacuation before impact to reduce casualties
-      payload: EvacuationPayload
+  type: object
+  required: [action_type, threat_id]
+  properties:
+    action_type: {type: string, enum: [classify, predict, allocate, rescue]}
+    threat_id: {type: string}
+    resource_id: {type: string, nullable: true}
+    priority_level: {type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW], nullable: true}
+    reasoning: {type: string, nullable: true}
 
 tasks:
-  - id: 1
-    name: Threat Classification
+  - id: easy
+    name: "Single-Threat Classification"
     difficulty: easy
-    action: classify
-    grader: classification_score
-    score_range: [0.0, 1.0]
-    description: >
-      Correctly identify the type and severity of each active threat.
-      Score = 0.55 × exact_match + 0.25 × domain_match + 0.20 × severity_accuracy.
-  - id: 2
-    name: Impact Prediction
+    description: "5 clear threats, one at a time. No resource conflicts. Expected score: ~0.80"
+  - id: medium
+    name: "Multi-Threat Coordination"
     difficulty: medium
-    action: predict
-    grader: prediction_score
-    score_range: [0.0, 1.0]
-    description: >
-      Predict time-to-impact and population affected for each threat.
-      Score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio).
-  - id: 3
-    name: Resource Allocation
-    difficulty: medium_plus
-    action: allocate
-    grader: allocation_score
-    score_range: [0.0, 1.0]
-    description: >
-      Assign the most effective zone-matched resource to each threat.
-      Score = 0.45 × type_compatibility + 0.30 × intercept_prob + 0.15 × budget_efficiency + 0.10 × proximity.
-  - id: 4
-    name: Multi-Threat Coordination
+    description: "10 mixed threats, hidden cascade. Prioritization required. Expected score: ~0.55"
+  - id: hard
+    name: "Full Lifecycle Rescue Optimization"
     difficulty: hard
-    action: coordinate
-    grader: coordination_score
-    score_range: [0.0, 1.0]
-    description: >
-      Set optimal priority ordering across all simultaneous threats.
-      Score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided.
-  - id: 5
-    name: Rescue Optimisation
-    difficulty: advanced
-    action: rescue
-    grader: rescue_score
-    score_range: [0.0, 1.0]
-    description: >
-      Deploy rescue units into impacted zones to maximise lives saved.
-      Score = 0.40 × victims_saved + 0.25 × unit_efficiency + 0.20 × speed_score + 0.15 × unit_type_match.
+    description: "15 threats, resource scarcity, rescue phase. CRITICAL miss penalty. Expected score: ~0.30"
+
+endpoints:
+  reset:  "POST /reset"
+  step:   "POST /step"
+  state:  "GET /state"
+  health: "GET /health"
+
 reward:
-  internal_range: [-inf, +inf]
-  final_score_range: [0.0, 1.0]
-  shaping:
-    - correct_classification:    +1.0 to +1.5 (dense progress)
-    - accurate_prediction:       +1.0 to +1.3
-    - good_allocation:           +1.0 to +2.0 (zone/priority boosted)
-    - good_coordination:         +1.0 to +2.0
-    - rescue_save:               +1.5 to +3.0 (saved_ratio*0.75)
-    - threat_contained:          +3.0
-    - baseline_step:             +0.10 (anti-zero rewards)
-    - terminal_bonus:            +2.0 * final_score
+  type: dense
+  range: [0.0, 1.0]
+  description: >
+    Per-step dense rewards. Correct priority: +0.50. Correct resource: +0.30.
+    Rescue speed bonus: +0.20. Wrong threat_id: -0.10. Invalid action: -0.20.
+    Missed CRITICAL: -0.20. All rewards clipped to [0.0, 1.0] per step.
 
-episode:
-  max_steps: 30
-  easy_steps: 22
-  medium_steps: 26
-  hard_steps: 30
-  simultaneous_threats: 3
-  difficulty_profiles:
-    easy:   { threats: 2, obs_noise: 0.08, budget: 10 }
-    medium: { threats: 3, obs_noise: 0.16, budget: 9 }
-    hard:   { threats: 4, obs_noise: 0.24, budget: 8 }
-  resource_units: 8
-
-inference:
-  script: inference.py
-  env_vars:
-    - API_BASE_URL
-    - MODEL_NAME
-    - HF_TOKEN
-    - SEED
-    - USE_LLM
-  runtime_limit_minutes: 20
-  machine: vcpu=2, memory=8gb
+environment:
+  episode_length:
+    easy: 5
+    medium: 10
+    hard: 15
+  reset_clears_state: true
+  observations_are_deterministic: true

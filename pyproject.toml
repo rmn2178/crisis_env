@@ -1,21 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
 [project]
-name = "crisis_response_env"
+name = "crisis-response-env"
 version = "1.0.0"
-description = "AI Crisis Response & Rescue Coordination Environment"
-requires-python = ">=3.9"
+description = "OpenEnv-compliant AI Crisis Response and Rescue Coordination Environment"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
 dependencies = [
-    "openenv>=0.2.0",
-    "fastapi>=0.109.0",
-    "uvicorn>=0.27.0",
-    "pydantic>=2.5.0",
-    "numpy>=1.24.0",
-    "torch>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "pydantic>=2.0.0",
+    "openenv-core>=0.1.0",
+    "openai>=1.0.0",
     "requests>=2.31.0",
-    "websocket-client>=1.7.0",
 ]
 
-[project.scripts]
-server = "server.app:main"
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "httpx>=0.24", "ruff>=0.1.0"]
 
-[tool.openenv]
-name = "crisis_response_env"
+[tool.pytest.ini_options]
+testpaths = ["server/tests", "tests"]
+asyncio_mode = "auto"

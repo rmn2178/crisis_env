@@ -1,1 +1,1 @@
-# server package
+"""Server package for Crisis Response Environment."""
